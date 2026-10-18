@@ -469,3 +469,181 @@ def test_nm_sampling_workflow_abort_exits_nonzero(tmp_path, monkeypatch):
     assert not any(
         "finished successfully" in str(c.args[1]) for c in m_padded.call_args_list
     )
+
+
+# ---------------------------------------------------------------------------
+# decompose_force_errors
+# ---------------------------------------------------------------------------
+
+def _water_dimer():
+    from beep.core.normal_mode_sampling import decompose_force_errors  # noqa: F401
+    pos = np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.24, 0.93, 0.0],
+                    [2.9, 0.0, 0.0], [3.3, 0.8, 0.0], [3.3, -0.8, 0.0]])
+    masses = np.array([16.0, 1.0, 1.0, 16.0, 1.0, 1.0])
+    return pos, masses, [[0, 1, 2], [3, 4, 5]]
+
+
+def _pair(delta_plus, delta_minus, band="intermolecular"):
+    pos, masses, _ = _water_dimer()
+    return [
+        {"pair": (0, 0.1), "sign": +1, "band": band, "delta": delta_plus,
+         "positions_A": pos, "masses": masses},
+        {"pair": (0, 0.1), "sign": -1, "band": band, "delta": delta_minus,
+         "positions_A": pos, "masses": masses},
+    ]
+
+
+def test_decompose_constant_offset_goes_to_offset_only():
+    """An error identical at +A and -A is pure offset: zero response."""
+    from beep.core.normal_mode_sampling import decompose_force_errors
+    _, _, frags = _water_dimer()
+    rng = np.random.default_rng(0)
+    offset = rng.normal(size=(6, 3))
+    parts = decompose_force_errors(_pair(offset, offset), frags)
+    np.testing.assert_allclose(parts["response"]["all"], 0.0, atol=1e-12)
+    np.testing.assert_allclose(parts["offset"]["all"], offset.ravel())
+
+
+def test_decompose_antisymmetric_error_goes_to_response_only():
+    from beep.core.normal_mode_sampling import decompose_force_errors
+    _, _, frags = _water_dimer()
+    d = np.random.default_rng(1).normal(size=(6, 3))
+    parts = decompose_force_errors(_pair(d, -d), frags)
+    np.testing.assert_allclose(parts["offset"]["all"], 0.0, atol=1e-12)
+    np.testing.assert_allclose(parts["response"]["all"], d.ravel())
+
+
+def test_decompose_internal_forces_cancel_in_rigid_body_parts():
+    """Equal and opposite forces along a bond (an internal force) give no
+    net force and no torque on the fragment."""
+    from beep.core.normal_mode_sampling import decompose_force_errors
+    pos, _, frags = _water_dimer()
+    d = np.zeros((6, 3))
+    bond = pos[1] - pos[0]
+    d[0], d[1] = 5.0 * bond, -5.0 * bond
+    parts = decompose_force_errors(_pair(d, d), frags)
+    np.testing.assert_allclose(parts["intermolecular"]["all"], 0.0, atol=1e-12)
+    np.testing.assert_allclose(parts["torque"]["all"], 0.0, atol=1e-12)
+    assert np.abs(parts["offset"]["all"]).max() > 1.0
+
+
+def test_decompose_rigid_translation_error_is_net_force():
+    from beep.core.normal_mode_sampling import decompose_force_errors
+    _, _, frags = _water_dimer()
+    d = np.zeros((6, 3)); d[[3, 4, 5], 0] = 2.0     # push molecule 2 along x
+    parts = decompose_force_errors(_pair(d, d), frags)
+    net = parts["intermolecular"]["all"].reshape(-1, 3)   # 2 geoms x 2 frags
+    np.testing.assert_allclose(net[1], [6.0, 0.0, 0.0])
+    np.testing.assert_allclose(net[0], 0.0, atol=1e-12)
+
+
+def test_decompose_unpaired_sample_skips_pair_parts_and_tracks_band():
+    from beep.core.normal_mode_sampling import decompose_force_errors
+    _, _, frags = _water_dimer()
+    samples = _pair(np.ones((6, 3)), np.ones((6, 3)), band="stretching")[:1]
+    parts = decompose_force_errors(samples, frags)
+    assert parts["offset"]["all"].size == 0
+    assert parts["response"]["all"].size == 0
+    assert parts["intermolecular"]["stretching"].size == 6   # 2 frags x 3
+
+
+# ---------------------------------------------------------------------------
+# geometry shift (Newton step)
+# ---------------------------------------------------------------------------
+
+def _model_hessian(pos_bohr, masses, k_bond=0.5, k_soft=0.01):
+    """Random SPD Hessian with translations/rotations projected out, so its
+    pseudo-inverse is well defined (stiff + soft eigenvalues)."""
+    from beep.core.normal_mode_sampling import hessian_pseudo_inverse  # noqa: F401
+    n = 3 * len(masses)
+    rng = np.random.default_rng(3)
+    q, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    h = q @ np.diag(np.linspace(k_soft, k_bond, n)) @ q.T
+    return h
+
+
+def test_hessian_pseudo_inverse_inverts_on_vibrational_space():
+    from beep.core.normal_mode_sampling import hessian_pseudo_inverse
+    pos, masses, _ = _water_dimer()
+    pos_b = pos / 0.529177210903
+    h = _model_hessian(pos_b, masses)
+    h_plus, n_kept = hessian_pseudo_inverse(h, masses, pos_b, min_freq_cm=0.0)
+    assert n_kept == 3 * len(masses) - 6
+    # A displacement that is a pure vibration is recovered from its force.
+    w, v = np.linalg.eigh(h_plus)
+    d = v[:, -1] * 0.01
+    np.testing.assert_allclose(h_plus @ np.linalg.pinv(h_plus) @ d, d, atol=1e-10)
+
+
+def test_hessian_pseudo_inverse_ignores_rigid_translation_force():
+    """A uniform force (pure translation of the whole system) has no
+    vibrational component, so it predicts no geometry shift."""
+    from beep.core.normal_mode_sampling import hessian_pseudo_inverse
+    pos, masses, _ = _water_dimer()
+    pos_b = pos / 0.529177210903
+    h_plus, _ = hessian_pseudo_inverse(_model_hessian(pos_b, masses), masses, pos_b,
+                                       min_freq_cm=0.0)
+    g = np.tile(masses[:, None] * np.array([1.0, 0.0, 0.0]), 1).ravel()
+    np.testing.assert_allclose(h_plus @ g, 0.0, atol=1e-10)
+
+
+def test_hessian_pseudo_inverse_drops_modes_below_floor():
+    from beep.core.normal_mode_sampling import hessian_pseudo_inverse
+    pos, masses, _ = _water_dimer()
+    pos_b = pos / 0.529177210903
+    h = _model_hessian(pos_b, masses)
+    _, all_kept = hessian_pseudo_inverse(h, masses, pos_b, min_freq_cm=0.0)
+    _, some_kept = hessian_pseudo_inverse(h, masses, pos_b, min_freq_cm=1e6)
+    assert some_kept == 0 < all_kept
+
+
+def test_rigid_body_split_translation_and_internal():
+    from beep.core.normal_mode_sampling import rigid_body_split
+    pos, _, frags = _water_dimer()
+    shift = np.zeros((6, 3)); shift[[3, 4, 5]] = [0.1, 0.0, 0.0]   # rigid move
+    rigid, internal = rigid_body_split(shift, pos, frags)
+    np.testing.assert_allclose(rigid, shift, atol=1e-12)
+    np.testing.assert_allclose(internal, 0.0, atol=1e-12)
+    bond = np.zeros((6, 3)); bond[1] = 0.01 * (pos[1] - pos[0])      # stretch O-H
+    rigid, internal = rigid_body_split(bond, pos, frags)
+    np.testing.assert_allclose(rigid + internal, bond, atol=1e-12)
+    assert np.abs(internal).max() > 0.0
+
+
+def test_mean_pair_offset_averages_complete_pairs_only():
+    from beep.core.normal_mode_sampling import mean_pair_offset
+    samples = _pair(np.full((6, 3), 3.0), np.full((6, 3), 1.0))
+    lonely = dict(samples[0]); lonely["pair"] = (9, 0.1); lonely["delta"] = np.full((6, 3), 99.0)
+    np.testing.assert_allclose(mean_pair_offset(samples + [lonely]), 2.0)
+    assert mean_pair_offset([lonely]) is None
+
+
+def test_log_nm_force_decomposition_sorts_and_marks_best():
+    import logging
+    from beep.core.logging_utils import log_nm_force_decomposition
+
+    class _Cap(logging.Handler):
+        def __init__(self):
+            super().__init__(); self.lines = []
+        def emit(self, record):
+            self.lines.append(record.getMessage())
+
+    log = logging.getLogger("test_nm_decomp"); log.setLevel(logging.INFO)
+    cap = _Cap(); log.addHandler(cap)
+    base = {"rmsd_force": 1.0, "rmsd_force_offset": 1.0, "rmsd_force_response": 1.0,
+            "rmsd_torque": 1.0, "geometry_shift_intermolecular": 0.01}
+    metrics = {
+        "a_x": {**base, "rmsd_force_intermolecular": 30.0, "rmsd_force": 10.0},
+        "b_x": {**base, "rmsd_force_intermolecular": 10.0, "rmsd_force": 90.0},
+        "c_x": {**base, "rmsd_force_intermolecular": 20.0, "rmsd_force": 50.0},
+    }
+    log_nm_force_decomposition(log, metrics, {"geom_grp": ["A_x", "B_x", "C_x"]})
+    rows = [l for l in cap.lines if l[:3] in ("A_x", "B_x", "C_x")]
+    assert [r[:3] for r in rows] == ["B_x", "C_x", "A_x"]
+    assert rows[0].endswith("*") and not rows[1].endswith("*")
+    log.removeHandler(cap)
+
+
+def test_nm_sampling_ranking_metric_defaults_to_intermolecular():
+    from beep.models.nm_sampling import NmSamplingConfig
+    assert NmSamplingConfig.model_fields["ranking_metric"].default == "intermolecular"
