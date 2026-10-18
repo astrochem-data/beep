@@ -189,6 +189,33 @@ class NmSamplingConfig(BaseModel):
         description="Multiplier on the band amplitude for the extra-amplitude entries",
     )
 
+    # --- Reporting ---
+    geometry_shift_min_freq_cm: float = Field(
+        20.0, ge=0.0,
+        description=(
+            "Normal modes below this frequency (cm⁻¹) are excluded when the "
+            "force offset is converted into a predicted geometry shift "
+            "(Δx = H⁺·ΔF): for near-free motions 1/k amplifies noise."
+        ),
+    )
+    ranking_metric: Literal["total", "response", "intermolecular"] = Field(
+        "intermolecular",
+        description=(
+            "Force metric that sorts the decomposition table and picks the "
+            "best functional per group. "
+            "'intermolecular' (default) = RMSD of the net force per fragment, "
+            "the part relevant to binding. "
+            "'total' = RMSD over every Cartesian force component (the pre-"
+            "2026-10 behaviour; "
+            "dominated by stiff bond stretches, so a functional whose bond "
+            "lengths differ slightly from the reference scores badly even "
+            "at intermolecular displacements). 'response' = RMSD of "
+            "(F+ − F−)/2 over ± pairs: the force error that grows with the "
+            "displacement, with the error already present at the "
+            "displacement centre cancelled. All metrics are always reported."
+        ),
+    )
+
     # --- Run-mode controls ---
     pre_run: bool = Field(
         False,

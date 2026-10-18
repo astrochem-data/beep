@@ -34,12 +34,18 @@ except ImportError:  # pragma: no cover
 
 from ..adapters import qcfractal_adapter as qcf
 from ..adapters.qcfractal_adapter import is_complete, is_incomplete, is_error
-from .logging_utils import padded_log, log_trajectory_metrics_per_group
+from .logging_utils import (
+    padded_log, log_trajectory_metrics_per_group, log_nm_force_decomposition,
+)
 from .normal_mode_sampling import (
     classify_mode, select_modes, displace_along_mode,
-    write_molden, write_modes_json,
+    write_molden, write_modes_json, decompose_force_errors,
+    hessian_pseudo_inverse, mean_pair_offset, predicted_geometry_shift,
 )
-from .trajectory_metrics import per_step_deltas, summarize_method_metrics
+from .trajectory_metrics import (
+    per_step_deltas, summarize_method_metrics, BOHR_TO_ANGSTROM,
+    HARTREE_PER_BOHR_TO_MEV_PER_A,
+)
 
 bcheck = "✔"
 gear = "⚙"
@@ -123,12 +129,14 @@ def collect_system_normal_modes(
     client, ref_mols: Dict[str, Molecule], hessian_lot: str,
     fragments_per_struct: Dict[str, Sequence[Sequence[int]]],
     inter_threshold: float, bend_max_cm: float,
-    logger: logging.Logger,
+    logger: logging.Logger, geometry_shift_min_freq_cm: float = 20.0,
 ) -> Dict[str, dict]:
     """Per system, fetch the Hessian record and classify each normal mode.
 
-    Returns ``{struct_name → {frequencies_cm, modes_cart, classes, mol}}``.
-    Systems with missing Hessians are skipped.
+    Returns ``{struct_name → {frequencies_cm, modes_cart, classes, mol,
+    hessian_plus}}``; ``hessian_plus`` is the vibrational pseudo-inverse used
+    to turn a force offset into a predicted geometry shift. Systems with
+    missing Hessians are skipped.
     """
     out: Dict[str, dict] = {}
     for struct_name, mol in ref_mols.items():
@@ -139,8 +147,8 @@ def collect_system_normal_modes(
             )
             continue
         try:
-            freqs_cm, modes_cart, mol_from_record = qcf.fetch_normal_modes(
-                client, mol.id, hessian_lot,
+            freqs_cm, modes_cart, mol_from_record, hessian = qcf.fetch_normal_modes(
+                client, mol.id, hessian_lot, return_hessian=True,
             )
         except Exception as exc:
             logger.warning(
@@ -195,11 +203,15 @@ def collect_system_normal_modes(
             f"stretching={counts['stretching']}"
         )
 
+        hessian_plus, _n_kept = hessian_pseudo_inverse(
+            hessian, masses, positions, min_freq_cm=geometry_shift_min_freq_cm,
+        )
         out[struct_name] = {
             "frequencies_cm": freqs_cm,
             "modes_cart": modes_cart,
             "classes": classes,
             "mol": mol_from_record,
+            "hessian_plus": hessian_plus,
         }
     return out
 
@@ -478,10 +490,17 @@ def wait_for_nm_completion(
 # Step 8 — compute per-method force-RMSD vs reference
 # ---------------------------------------------------------------------------
 
+def _rms(values) -> float:
+    values = np.asarray(values, dtype=float)
+    return float(np.sqrt(np.mean(values ** 2))) if values.size else float("nan")
+
+
 def compute_per_method_nm_metrics(
     displaced: Dict[str, List[Tuple[str, Molecule, dict]]],
     sp_dsets: dict, all_dft_functionals: List[str],
     reference_spec_name: str, logger: logging.Logger,
+    fragments_per_struct: Dict[str, Sequence[Sequence[int]]] = None,
+    mode_data: Dict[str, dict] = None,
 ):
     """For each DFT functional, compare its gradient to the reference at
     every displaced geometry across every system. Returns
@@ -492,12 +511,26 @@ def compute_per_method_nm_metrics(
     ``per_step_deltas`` + ``summarize_method_metrics`` from
     ``trajectory_metrics``; the energy entries get zeros so the
     summariser's force outputs are the ones consumed downstream.
+
+    When ``fragments_per_struct`` is given, ``rmsd_force`` is complemented
+    by the decomposition of :func:`decompose_force_errors`:
+    ``rmsd_force_offset`` and ``rmsd_force_response`` (± pairs) and
+    ``rmsd_force_intermolecular`` / ``rmsd_torque`` (per fragment), plus
+    the same keys per mode band under ``by_band``.
+
+    When ``mode_data`` carries ``hessian_plus``, the force offset is also
+    converted into a predicted shift of the functional's minimum from the
+    reference minimum (``geometry_shift``, ``_intermolecular``,
+    ``_intramolecular``; Å, averaged over systems, per system under
+    ``by_system``).
     """
     metrics: Dict[str, dict] = {}
     raw_deltas: Dict[str, dict] = {}
 
     for functional in all_dft_functionals:
         per_system = []
+        per_system_parts = []
+        shifts = {}
         skipped_systems = 0
 
         for struct_name, entries in displaced.items():
@@ -506,6 +539,7 @@ def compute_per_method_nm_metrics(
                 continue
 
             ref_e, ref_g, dft_e, dft_g = [], [], [], []
+            kept = []
             n_atoms = None
             for entry_name, _mol, _meta in entries:
                 de_dft, dg_dft = qcf.fetch_sp_energy_gradient(
@@ -523,16 +557,44 @@ def compute_per_method_nm_metrics(
                 ref_g.append(dg_ref)
                 dft_e.append(0.0)
                 dft_g.append(dg_dft)
+                kept.append((_mol, _meta))
 
             if not ref_e:
                 skipped_systems += 1
                 continue
 
-            per_system.append(per_step_deltas(
+            deltas = per_step_deltas(
                 np.asarray(ref_e), np.asarray(ref_g),
                 np.asarray(dft_e), np.asarray(dft_g),
                 n_atoms=n_atoms,
-            ))
+            )
+            per_system.append(deltas)
+
+            if fragments_per_struct and struct_name in fragments_per_struct:
+                samples = []
+                for (mol, meta), delta in zip(
+                    kept, deltas["delta_force_meV_per_A"],
+                ):
+                    samples.append({
+                        "pair": (meta["mode_idx"], meta["amplitude_A"]),
+                        "sign": meta["sign"],
+                        "band": meta["band"],
+                        "delta": delta,
+                        "positions_A": np.asarray(mol.geometry).reshape(-1, 3)
+                        * BOHR_TO_ANGSTROM,
+                        "masses": np.asarray(mol.masses),
+                    })
+                per_system_parts.append(decompose_force_errors(
+                    samples, fragments_per_struct[struct_name],
+                ))
+                hplus = (mode_data or {}).get(struct_name, {}).get("hessian_plus")
+                offset = mean_pair_offset(samples)
+                if hplus is not None and offset is not None:
+                    shifts[struct_name] = predicted_geometry_shift(
+                        offset / HARTREE_PER_BOHR_TO_MEV_PER_A, hplus,
+                        np.asarray(mode_data[struct_name]["mol"].geometry),
+                        fragments_per_struct[struct_name],
+                    )
 
         if not per_system:
             logger.warning(
@@ -541,6 +603,15 @@ def compute_per_method_nm_metrics(
             continue
 
         metrics[functional] = summarize_method_metrics(per_system)
+        if per_system_parts:
+            metrics[functional].update(_summarize_force_parts(per_system_parts))
+        if shifts:
+            for key in ("geometry_shift", "geometry_shift_intermolecular",
+                        "geometry_shift_intramolecular"):
+                metrics[functional][key] = float(
+                    np.mean([v[key] for v in shifts.values()])
+                )
+            metrics[functional]["by_system"] = shifts
         raw_deltas[functional] = {
             "delta_e_per_atom_meV": np.concatenate(
                 [d["delta_e_per_atom_meV"] for d in per_system]
@@ -554,6 +625,34 @@ def compute_per_method_nm_metrics(
                 f"  {functional}: {skipped_systems} systems had no complete records."
             )
     return metrics, raw_deltas
+
+
+_FORCE_PART_KEYS = {
+    "offset": "rmsd_force_offset",
+    "response": "rmsd_force_response",
+    "intermolecular": "rmsd_force_intermolecular",
+    "torque": "rmsd_torque",
+}
+
+
+def _summarize_force_parts(per_system_parts: List[dict]) -> dict:
+    """RMS of each decomposition part, overall and per mode band."""
+    pooled: Dict[str, Dict[str, list]] = {}
+    for parts in per_system_parts:
+        for part, bands in parts.items():
+            for band, values in bands.items():
+                pooled.setdefault(part, {}).setdefault(band, []).append(values)
+    summary = {}
+    by_band: Dict[str, dict] = {}
+    for part, key in _FORCE_PART_KEYS.items():
+        for band, chunks in pooled.get(part, {}).items():
+            value = _rms(np.concatenate(chunks))
+            if band == "all":
+                summary[key] = value
+            else:
+                by_band.setdefault(band, {})[key] = value
+    summary["by_band"] = by_band
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +713,7 @@ def run_nm_sampling(
         inter_threshold=config.inter_threshold,
         bend_max_cm=config.bend_max_cm,
         logger=logger,
+        geometry_shift_min_freq_cm=config.geometry_shift_min_freq_cm,
     )
     if not mode_data:
         logger.warning("\n  No usable normal-mode data — aborting.\n")
@@ -750,6 +850,8 @@ def run_nm_sampling(
     metrics, raw_deltas = compute_per_method_nm_metrics(
         displaced, sp_dsets, all_dft_functionals,
         reference_spec_name, logger,
+        fragments_per_struct=fragments_per_struct,
+        mode_data=mode_data,
     )
 
     padded_log(logger, "NM-SAMPLING BENCHMARK RESULTS", padding_char=gear)
@@ -760,6 +862,31 @@ def run_nm_sampling(
     log_trajectory_metrics_per_group(
         logger, metrics, dft_geom_functionals, ranking_df=None,
     )
+
+    sort_keys = {
+        "total": ("rmsd_force", "Total"),
+        "response": ("rmsd_force_response", "Response"),
+        "intermolecular": ("rmsd_force_intermolecular", "Net force"),
+    }
+    sort_key, sort_label = sort_keys[config.ranking_metric]
+    padded_log(logger, "NM-SAMPLING FORCE-ERROR DECOMPOSITION (meV/Å; torque meV)")
+    log_nm_force_decomposition(
+        logger, metrics, dft_geom_functionals,
+        sort_key=sort_key, sort_label=sort_label,
+    )
+    logger.info("")
+    logger.info("  Net force / Torque = error of the force / torque on each molecule")
+    logger.info("              as a whole; bond forces cancel, so both are purely")
+    logger.info("              intermolecular (the part relevant to binding).")
+    logger.info("  Shift (Å) = predicted intermolecular shift of the functional's")
+    logger.info("              minimum from the reference one, H⁺·(offset), using the")
+    logger.info(f"              {config.hessian_lot} Hessian (an estimate, not a measurement).")
+    logger.info("  Response  = error of (F+ - F-)/2 over ± pairs: the force error that")
+    logger.info("              grows with the displacement amplitude.")
+    logger.info("  Offset    = error of (F+ + F-)/2: the force error already present at")
+    logger.info("              the displacement centre (e.g. different bond lengths).")
+    logger.info(f"  Rows sorted by {sort_label} (ranking_metric = '{config.ranking_metric}').")
+    logger.info("  Per-band and per-system values: data/json/results_nm_sampling.json.")
     logger.info("")
     logger.info("  Note — RMSD_F is the root-mean-square error of the per-")
     logger.info("         Cartesian-component DFT force vs the CCSD(T) reference")

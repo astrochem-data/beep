@@ -2046,8 +2046,8 @@ def fetch_sp_energy_gradient(
 
 
 def fetch_normal_modes(
-    client: PortalClient, mol, hessian_lot: str,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Molecule]]:
+    client: PortalClient, mol, hessian_lot: str, return_hessian: bool = False,
+):
     """Fetch the complete Hessian record for ``mol`` at ``hessian_lot`` and
     run vibrational analysis. Returns ``(frequencies_cm, modes_cart, mol_obj)``
     where modes are Cartesian, un-mass-weighted, and TR-projected.
@@ -2069,6 +2069,8 @@ def fetch_normal_modes(
     frequencies_cm : (n_vib,) complex ndarray, or None if no record
     modes_cart : (n_vib, n_atoms, 3) ndarray, or None if no record
     mol_obj : qcelemental Molecule (the one attached to the record), or None
+    hessian : (3N, 3N) ndarray in Eh/bohr², only when ``return_hessian`` is
+        True (appended as a fourth element; None if no record)
     """
     from ..core.normal_mode_sampling import extract_normal_modes_from_hessian_record
 
@@ -2091,7 +2093,7 @@ def fetch_normal_modes(
         logger.info(
             f"No complete hessian record at {method}/{basis} for molecule {mol}."
         )
-        return None, None, None
+        return (None, None, None, None) if return_hessian else (None, None, None)
     if len(results) > 1:
         logger.warning(
             f"Found {len(results)} complete hessian records for molecule {mol} "
@@ -2110,6 +2112,8 @@ def fetch_normal_modes(
     freqs_cm, modes_cart = extract_normal_modes_from_hessian_record(
         hess=hess, molecule=record.molecule, energy=energy,
     )
+    if return_hessian:
+        return freqs_cm, modes_cart, record.molecule, hess
     return freqs_cm, modes_cart, record.molecule
 
 

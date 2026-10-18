@@ -15,7 +15,7 @@ Hessian record off the server and unpacking it into the array shape used here.
 """
 import json
 from pathlib import Path
-from typing import Dict, List, Literal, Sequence, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -458,3 +458,206 @@ def write_modes_json(
         "modes": modes,
     }
     Path(filepath).write_text(json.dumps(payload, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# Force-error decomposition (offset / response / rigid-body)
+# ---------------------------------------------------------------------------
+
+def decompose_force_errors(
+    samples: Sequence[dict],
+    fragment_atom_indices: Sequence[Sequence[int]],
+) -> Dict[str, Dict[str, np.ndarray]]:
+    """Split per-geometry force errors of one system into physical parts.
+
+    Each sample is one displaced geometry::
+
+        {"pair": (mode_idx, amplitude_A), "sign": +1 | -1, "band": str,
+         "delta": (n_atoms, 3) DFT − reference force error, meV/Å,
+         "positions_A": (n_atoms, 3), "masses": (n_atoms,)}
+
+    Every mode is displaced by +A and −A around the same centre, so the
+    error of a ± pair splits exactly into
+
+    * ``offset``    = (δ₊ + δ₋)/2 — the error already present at the
+      centre (e.g. a functional whose bond lengths differ from the
+      reference feels a restoring force at every geometry);
+    * ``response``  = (δ₊ − δ₋)/2 — the force error that grows with the
+      displacement amplitude (it originates in a second derivative that
+      differs from the reference); the offset cancels exactly.
+
+    The rigid-body parts are taken per fragment at every geometry:
+
+    * ``intermolecular`` — net force error on each fragment (Σ δ_i). Internal
+      forces cancel in the sum, so this is purely intermolecular;
+    * ``torque`` — torque error about each fragment's centre of mass,
+      Σ (r_i − r_COM) × δ_i, in meV; also purely intermolecular.
+
+    Returns ``{part → {band → flat array}}`` with an ``"all"`` band holding
+    every value. Pairs with a missing partner are skipped for
+    offset/response but still contribute to the rigid-body parts.
+    """
+    parts = ("offset", "response", "intermolecular", "torque")
+    out: Dict[str, Dict[str, list]] = {p: {"all": []} for p in parts}
+
+    def _add(part, band, values):
+        values = np.asarray(values, dtype=float).ravel()
+        out[part]["all"].append(values)
+        out[part].setdefault(band, []).append(values)
+
+    by_pair: Dict[tuple, Dict[int, dict]] = {}
+    for s in samples:
+        by_pair.setdefault(tuple(s["pair"]), {})[int(s["sign"])] = s
+        delta = np.asarray(s["delta"], dtype=float)
+        pos = np.asarray(s["positions_A"], dtype=float)
+        masses = np.asarray(s["masses"], dtype=float)
+        for frag in fragment_atom_indices:
+            frag = list(frag)
+            m = masses[frag]
+            com = (pos[frag] * m[:, None]).sum(axis=0) / m.sum()
+            _add("intermolecular", s["band"], delta[frag].sum(axis=0))
+            _add("torque", s["band"],
+                 np.cross(pos[frag] - com, delta[frag]).sum(axis=0))
+
+    for pair in by_pair.values():
+        if 1 not in pair or -1 not in pair:
+            continue
+        plus, minus = pair[1], pair[-1]
+        d_plus = np.asarray(plus["delta"], dtype=float)
+        d_minus = np.asarray(minus["delta"], dtype=float)
+        _add("offset", plus["band"], (d_plus + d_minus) / 2)
+        _add("response", plus["band"], (d_plus - d_minus) / 2)
+
+    return {
+        part: {
+            band: np.concatenate(chunks) if chunks else np.empty(0)
+            for band, chunks in bands.items()
+        }
+        for part, bands in out.items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# Force offset -> predicted geometry shift (Newton step)
+# ---------------------------------------------------------------------------
+
+def _sqrt_au_to_cm() -> float:
+    """cm⁻¹ per sqrt(Eh / (bohr² · amu)) — frequency of a mass-weighted
+    Hessian eigenvalue of 1 in atomic units."""
+    import qcelemental as qcel
+    c = qcel.constants
+    eh = c.conversion_factor("hartree", "J")
+    bohr = c.conversion_factor("bohr", "m")
+    amu = c.conversion_factor("amu", "kg")
+    c_cm = c.c * 100.0
+    return float(np.sqrt(eh / (bohr ** 2 * amu)) / (2.0 * np.pi * c_cm))
+
+
+def hessian_pseudo_inverse(
+    hessian: np.ndarray, masses_amu: np.ndarray, positions_bohr: np.ndarray,
+    min_freq_cm: float = 20.0,
+) -> Tuple[np.ndarray, int]:
+    """Pseudo-inverse of a Cartesian Hessian restricted to real vibrations.
+
+    Translations and rotations are projected out in mass-weighted
+    coordinates; modes with frequency below ``min_freq_cm`` (near-free
+    motions, where 1/k amplifies noise) and imaginary modes are dropped.
+
+    Returns ``(H_plus, n_modes_kept)`` with ``H_plus`` in bohr²/Eh, so that
+    ``H_plus @ gradient_Eh_per_bohr`` is a displacement in bohr.
+    """
+    m = np.repeat(np.asarray(masses_amu, dtype=float), 3)
+    inv_sqrt_m = 1.0 / np.sqrt(m)
+    hmw = inv_sqrt_m[:, None] * np.asarray(hessian, dtype=float) * inv_sqrt_m[None, :]
+
+    pos = np.asarray(positions_bohr, dtype=float).reshape(-1, 3)
+    mass = np.asarray(masses_amu, dtype=float)
+    com = (pos * mass[:, None]).sum(axis=0) / mass.sum()
+    r = pos - com
+    sqrt_m_atom = np.sqrt(mass)
+    tr = []
+    for axis in range(3):
+        v = np.zeros_like(pos); v[:, axis] = sqrt_m_atom
+        tr.append(v.ravel())
+        e = np.zeros(3); e[axis] = 1.0
+        tr.append((np.cross(e, r) * sqrt_m_atom[:, None]).ravel())
+    # Orthonormal basis of the vibrational subspace (complement of the
+    # translations/rotations). Diagonalising only there keeps the TR
+    # directions out exactly, instead of relying on near-zero eigenvalues.
+    u, sv, _ = np.linalg.svd(np.array(tr).T, full_matrices=True)
+    n_tr = int(np.sum(sv > 1e-8 * sv.max()))
+    vib = u[:, n_tr:]
+    eigval, eigvec_vib = np.linalg.eigh(vib.T @ hmw @ vib)
+    eigvec = vib @ eigvec_vib
+
+    freqs = np.sign(eigval) * np.sqrt(np.abs(eigval)) * _sqrt_au_to_cm()
+    keep = (eigval > 0) & (freqs >= min_freq_cm)
+    pinv_mw = (eigvec[:, keep] / eigval[keep]) @ eigvec[:, keep].T
+    h_plus = inv_sqrt_m[:, None] * pinv_mw * inv_sqrt_m[None, :]
+    return h_plus, int(keep.sum())
+
+
+def mean_pair_offset(samples: Sequence[dict]) -> Optional[np.ndarray]:
+    """Average (δ₊ + δ₋)/2 over every complete ± pair of one system.
+
+    Every pair is centred on the same geometry, so each pair estimates the
+    same force error at the centre; averaging reduces the O(A²) noise.
+    Returns an ``(n_atoms, 3)`` array in the units of ``delta``, or None.
+    """
+    by_pair: Dict[tuple, Dict[int, np.ndarray]] = {}
+    for s in samples:
+        by_pair.setdefault(tuple(s["pair"]), {})[int(s["sign"])] = np.asarray(
+            s["delta"], dtype=float,
+        )
+    offsets = [
+        (p[1] + p[-1]) / 2 for p in by_pair.values() if 1 in p and -1 in p
+    ]
+    return np.mean(offsets, axis=0) if offsets else None
+
+
+def rigid_body_split(
+    displacement: np.ndarray, positions: np.ndarray,
+    fragment_atom_indices: Sequence[Sequence[int]],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Split a small displacement into per-fragment rigid motion
+    (translation + rotation, least squares) and the internal remainder."""
+    dx = np.asarray(displacement, dtype=float).reshape(-1, 3)
+    pos = np.asarray(positions, dtype=float).reshape(-1, 3)
+    rigid = np.zeros_like(dx)
+    for frag in fragment_atom_indices:
+        frag = list(frag)
+        r = pos[frag] - pos[frag].mean(axis=0)
+        a = np.zeros((3 * len(frag), 6))
+        for k, ri in enumerate(r):
+            a[3 * k:3 * k + 3, :3] = np.eye(3)
+            a[3 * k:3 * k + 3, 3:] = -np.array([
+                [0.0, -ri[2], ri[1]], [ri[2], 0.0, -ri[0]], [-ri[1], ri[0], 0.0],
+            ])
+        sol, *_ = np.linalg.lstsq(a, dx[frag].ravel(), rcond=None)
+        rigid[frag] = (a @ sol).reshape(-1, 3)
+    return rigid, dx - rigid
+
+
+def predicted_geometry_shift(
+    offset_gradient: np.ndarray, hessian_plus: np.ndarray,
+    positions_bohr: np.ndarray, fragment_atom_indices: Sequence[Sequence[int]],
+) -> Dict[str, float]:
+    """First-order shift of the functional's minimum from the reference one.
+
+    ``Δx = H⁺ · Δg`` with ``Δg`` the gradient error at the displacement
+    centre (Eh/bohr). Reported as an RMS over atoms in Å, total and split
+    into the intermolecular (rigid per fragment) and intramolecular parts.
+    """
+    bohr_to_A = 0.529177210903
+    dx = (hessian_plus @ np.asarray(offset_gradient, dtype=float).ravel())
+    dx = dx.reshape(-1, 3) * bohr_to_A
+    rigid, internal = rigid_body_split(
+        dx, np.asarray(positions_bohr).reshape(-1, 3) * bohr_to_A,
+        fragment_atom_indices,
+    )
+    rms = lambda v: float(np.sqrt(np.mean(np.sum(v ** 2, axis=1))))
+    return {
+        "geometry_shift": rms(dx),
+        "geometry_shift_intermolecular": rms(rigid),
+        "geometry_shift_intramolecular": rms(internal),
+    }

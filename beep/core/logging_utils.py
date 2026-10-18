@@ -525,6 +525,8 @@ def log_trajectory_metrics_per_group(
     traj_metrics: dict,
     dft_geom_functionals: dict,
     ranking_df: pd.DataFrame = None,
+    metric_key: str = "rmsd_force",
+    metric_label: str = "RMSD_F",
 ) -> None:
     """Per-group trajectory force-RMSD table, BENCHMARK RESULTS style.
 
@@ -551,18 +553,24 @@ def log_trajectory_metrics_per_group(
     ranking_df : pd.DataFrame, optional
         Output of ``combined_zscore_ranking``; if provided, the
         per-group winner is chosen by ``combined_score``.
+    metric_key, metric_label : str, optional
+        Metric shown and used to pick the winner when ``ranking_df`` is
+        None (default: the total force RMSD, ``rmsd_force``).
     """
     if not traj_metrics:
         logger.warning("\n  No trajectory metrics to display.\n")
         return
 
     name_width = 30
-    metric_header = "RMSD_F (meV/Å)"
+    metric_header = f"{metric_label} (meV/Å)"
     summary = {}   # display_group -> (winner_mixed_case, best_metric_value)
 
     for group, funcs in dft_geom_functionals.items():
         group_display = _strip_group_prefix(group)
-        in_group = [f for f in funcs if f.lower() in traj_metrics]
+        in_group = [
+            f for f in funcs
+            if f.lower() in traj_metrics and metric_key in traj_metrics[f.lower()]
+        ]
         if not in_group:
             continue
 
@@ -581,10 +589,10 @@ def log_trajectory_metrics_per_group(
                 best_func = None
         else:
             best_func = min(
-                in_group, key=lambda f: traj_metrics[f.lower()]["rmsd_force"],
+                in_group, key=lambda f: traj_metrics[f.lower()][metric_key],
             )
             summary[group_display] = (
-                best_func, traj_metrics[best_func.lower()]["rmsd_force"],
+                best_func, traj_metrics[best_func.lower()][metric_key],
             )
 
         logger.info(f"\nFunctional Group: {group_display}")
@@ -592,7 +600,7 @@ def log_trajectory_metrics_per_group(
         logger.info(header)
         logger.info("-" * max(len(header), name_width + 18))
         for func in in_group:
-            v = traj_metrics[func.lower()]["rmsd_force"]
+            v = traj_metrics[func.lower()][metric_key]
             mark = "*" if func == best_func else " "
             logger.info(f"{func:<{name_width}} | {v:<14.4f} {mark}")
 
@@ -603,8 +611,8 @@ def log_trajectory_metrics_per_group(
         score_header = "Combined Score"
         fmt = "{:<+14.4f}"
     else:
-        title = "Summary of best functional per group (by RMSD_F):"
-        score_header = "RMSD_F (meV/Å)"
+        title = f"Summary of best functional per group (by {metric_label}):"
+        score_header = f"{metric_label} (meV/Å)"
         fmt = "{:<14.4f}"
 
     logger.info(f"\n{title}")
@@ -619,6 +627,77 @@ def log_trajectory_metrics_per_group(
             f"{group:<{name_width}} | {winner:<{name_width}} | "
             + fmt.format(score)
         )
+
+
+def log_nm_force_decomposition(
+    logger: logging.Logger,
+    nm_metrics: dict,
+    dft_geom_functionals: dict,
+    sort_key: str = "rmsd_force_intermolecular",
+    sort_label: str = "Net force",
+) -> None:
+    """Per-group table of the nm_sampling force-error decomposition.
+
+    Columns: total force RMSD, its split over ± pairs into offset (force
+    error at the displacement centre) and response (force error that grows
+    with the displacement), the rigid-body intermolecular parts (net force
+    and torque per fragment) and the predicted intermolecular shift of the
+    minimum (Å). Rows are sorted by ``sort_key`` (ascending); the best row
+    is marked ``*`` and listed in a per-group summary. Functionals without
+    decomposition data are skipped.
+    """
+    cols = [
+        ("rmsd_force_intermolecular", "Net force", "{:>10.2f}"),
+        ("rmsd_torque", "Torque", "{:>10.2f}"),
+        ("geometry_shift_intermolecular", "Shift (Å)", "{:>10.3f}"),
+        ("rmsd_force_response", "Response", "{:>10.2f}"),
+        ("rmsd_force_offset", "Offset", "{:>10.2f}"),
+        ("rmsd_force", "Total", "{:>10.2f}"),
+    ]
+    name_width = 30
+    nan = float("nan")
+
+    def _key(func):
+        v = nm_metrics[func.lower()].get(sort_key, nan)
+        return (v != v, v)          # NaN sorts last
+
+    summary = {}
+    for group, funcs in dft_geom_functionals.items():
+        in_group = [
+            f for f in funcs
+            if "rmsd_force_response" in nm_metrics.get(f.lower(), {})
+        ]
+        if not in_group:
+            continue
+        in_group = sorted(in_group, key=_key)
+        best = in_group[0]
+        group_display = _strip_group_prefix(group)
+        summary[group_display] = (best, nm_metrics[best.lower()].get(sort_key, nan))
+
+        logger.info(f"\nFunctional Group: {group_display}   (sorted by {sort_label})")
+        header = f"{'Level of Theory':<{name_width}}" + "".join(
+            f" | {label:>10}" for _, label, _ in cols
+        )
+        logger.info(header)
+        logger.info("-" * len(header))
+        for func in in_group:
+            m = nm_metrics[func.lower()]
+            mark = " *" if func == best else ""
+            logger.info(f"{func:<{name_width}}" + "".join(
+                " | " + fmt.format(m.get(key, nan)) for key, _, fmt in cols
+            ) + mark)
+
+    if not summary:
+        return
+    logger.info(f"\nSummary of best functional per group (by {sort_label}):")
+    summary_header = (
+        f"{'Functional Group':<{name_width}} | "
+        f"{'Level of Theory':<{name_width}} | {sort_label}"
+    )
+    logger.info(summary_header)
+    logger.info("-" * len(summary_header))
+    for group, (winner, value) in summary.items():
+        logger.info(f"{group:<{name_width}} | {winner:<{name_width}} | {value:.3f}")
 
 
 # Per-metric display metadata used by log_trajectory_ranking_table.
