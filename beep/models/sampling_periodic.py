@@ -21,6 +21,15 @@ class SamplingPeriodicConfig(BaseModel):
     atoms_collection: str = Field("atoms", description="SinglepointDataset with atomic adsorbates")
     surface_collection: str = Field(..., description="OptimizationDataset holding periodic slab structures")
     surface_clusters: List[str] = Field([], description="Subset of slabs to sample (empty = all entries in surface_collection)")
+    surface_specification: Optional[str] = Field(
+        None,
+        description=(
+            "Optimization specification in surface_collection whose result is the slab: each "
+            "slab is the final molecule of that spec's (complete) record, e.g. the slab relaxed "
+            "with the sampling model, the cell still from the entry's extras. None (default) "
+            "takes the entry's initial molecule."
+        ),
+    )
 
     # Periodic cell (per-slab override)
     cell: Optional[List[List[float]]] = Field(

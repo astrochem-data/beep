@@ -71,7 +71,8 @@ def config_summary_msg(config: SamplingPeriodicConfig) -> str:
         "",
         separator,
         f"  Adsorbate:            {config.molecule}",
-        f"  Surface collection:   {config.surface_collection}",
+        f"  Surface collection:   {config.surface_collection}"
+        + (f"  (slabs: '{config.surface_specification}' results)" if config.surface_specification else ""),
         f"  Level of theory:      {lot.display}",
         f"  PBC:                  {config.pbc}",
         f"  Step size:            {config.step_size_ang} A  (noise ±{config.grid_noise_frac*config.step_size_ang:.2f} A"
@@ -89,6 +90,26 @@ def config_summary_msg(config: SamplingPeriodicConfig) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def load_slab(ds_surf, slab_name: str, specification, logger=None):
+    """The slab to sample: the entry's initial molecule, or with ``specification`` the final
+    molecule of that spec's record, which must be complete. QCFractal does not carry molecule
+    extras into optimized geometries, so the entry's extras (cell, pbc) are put back on it."""
+    entry_mol = qcf.fetch_entry_initial_molecule(ds_surf, slab_name)
+    if not specification:
+        return entry_mol
+    record = qcf.fetch_opt_record(ds_surf, slab_name, specification)
+    if record.status.value != "complete":
+        raise RuntimeError(
+            f"sampling_periodic: slab {slab_name} of '{ds_surf.name}' under specification "
+            f"'{specification}' is {record.status.value}, not complete (record {record.id})"
+        )
+    if list(record.final_molecule.symbols) != list(entry_mol.symbols):
+        raise RuntimeError(f"sampling_periodic: record {record.id} does not hold slab {slab_name}")
+    if logger is not None:
+        logger.info(f"  slab: {specification} result of {slab_name} (record {record.id})")
+    return record.final_molecule.copy(update={"extras": dict(entry_mol.extras or {})})
 
 
 def _resolve_cell(config: SamplingPeriodicConfig, surface) -> list:
@@ -219,7 +240,7 @@ def run(config: SamplingPeriodicConfig, client: FractalClient) -> None:
         logger.info(f"  Slab {c+1}/{len(slabs)}: {slab_name}")
         logger.info("=" * 80 + "\n")
 
-        surface = qcf.fetch_entry_initial_molecule(ds_surf, slab_name)
+        surface = load_slab(ds_surf, slab_name, config.surface_specification, logger)
         cell_ang = _resolve_cell(config, surface)
         # Pad non-periodic axes so the slab cannot wrap into itself. The stored
         # convention is X x X x X/2, thinner than the slab, and the dispersion
