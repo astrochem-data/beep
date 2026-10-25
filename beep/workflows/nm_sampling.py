@@ -22,6 +22,7 @@ from ..models.base import safe_config_dump
 from ..core.logging_utils import padded_log, beep_banner
 from ..core.dft_functionals import (
     geom_hmgga_dz, geom_hmgga_tz, geom_gga_dz, geom_gga_tz, geom_sqm_mb,
+    geom_nl,
 )
 from ..core.nm_sampling_workflow import run_nm_sampling
 from ..adapters import qcfractal_adapter as qcf
@@ -92,6 +93,11 @@ def run(config: NmSamplingConfig, client: FractalClient) -> None:
         "geom_gga_tz":   geom_gga_tz(),
         "geom_sqm_mb":   geom_sqm_mb(),
     }
+    # Optional VV10 "-V" group, routed to ORCA+SCNL in build_nm_sp_datasets
+    # (Psi4 has no analytic VV10 gradient).
+    if config.include_nl_functionals:
+        dft_geom_functionals["geom_nl"] = geom_nl()
+        logger.info("include_nl_functionals=True -> adding VV10 group (ORCA+SCNL)")
     all_dft_functionals = [
         f for group in dft_geom_functionals.values() for f in group
     ]

@@ -211,6 +211,20 @@ def geom_sqm_mb():
         "WB97X-3c_vDZP",
     ]
 
+def geom_nl():
+    """OPTIONAL VV10 "-V" candidates for the geometry/force benchmarks.
+
+    Excluded from the default geom_* groups because Psi4 has no analytic VV10
+    gradient. These are routed to the ORCA driver with ``SCNL`` (see
+    ``is_nl_method``), which does give a complete VV10 gradient. Enabled per
+    workflow via the ``include_nl_functionals`` config flag.
+    """
+    return [
+        "B97M-V_def2-tzvpd",
+        "WB97M-V_def2-tzvpd",
+        "WB97X-V_def2-tzvpd",
+    ]
+
 
 def non_local():
     """Functionals with non-local (NL / VV10) dispersion treatment.
@@ -263,6 +277,24 @@ def is_3c_method(name: str) -> bool:
     if not name:
         return False
     return name.upper() in _THREE_C_METHODS
+
+
+_NL_METHODS = {
+    "B97M-V", "WB97M-V", "WB97X-V", "LC-VV10",
+}
+
+
+def is_nl_method(name: str) -> bool:
+    """True if ``name`` is a VV10 "-V" / non-local functional.
+
+    Such functionals need ORCA's self-consistent non-local (``SCNL``) for a
+    complete analytic gradient; Psi4 has no analytic VV10 gradient. The
+    nm_sampling workflow uses this to route these methods to the ORCA driver
+    with ``SCNL`` injected.
+    """
+    if not name:
+        return False
+    return name.upper() in _NL_METHODS
 
 
 def gcp_compatible_functionals():

@@ -141,6 +141,15 @@ class NmSamplingConfig(BaseModel):
     )
     _dep_dft_keyword = deprecated_null_only("dft_keyword", "qc_keywords")
     tag_dft_grad: Optional[str] = Field(None, description="Queue tag for the DFT gradient computations")
+    include_nl_functionals: bool = Field(
+        False,
+        description=(
+            "Also benchmark VV10 '-V' functionals (B97M-V, WB97M-V, WB97X-V). "
+            "These are routed to the ORCA driver with SCNL (program=orca, "
+            "regardless of dft_program) because Psi4 has no analytic VV10 "
+            "gradient. Off by default."
+        ),
+    )
 
     # --- Mode selection ---
     bands: Dict[str, BandSpec] = Field(
@@ -150,6 +159,20 @@ class NmSamplingConfig(BaseModel):
             "'intermolecular', 'bending', 'stretching' (matching the "
             "labels emitted by classify_mode). Defaults give 6 modes × "
             "2 (± per mode) = 12 displaced structures per system."
+        ),
+    )
+    manual_modes: Optional[Dict[str, List[int]]] = Field(
+        None,
+        description=(
+            "Per-structure explicit list of 0-based vibrational-mode indices "
+            "to displace, overriding the band-cap auto-selection FOR THAT "
+            "structure only. Indices match the pre_run mode JSON/molden "
+            "ordering. Each listed mode is displaced ± at the amplitude of its "
+            "own band (intermolecular/bending/stretching from `bands`); the "
+            "auto 'extra amplitude' doubling is not applied to manual sets. "
+            "Modes with |imag| > freq_max_imag_cm are skipped (with a warning). "
+            "Optional: structures absent from this map (or the whole field left "
+            "null) fall back to the normal `bands` cap selection."
         ),
     )
     inter_threshold: float = Field(

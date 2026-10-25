@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -46,6 +46,7 @@ from .trajectory_metrics import (
     per_step_deltas, summarize_method_metrics, BOHR_TO_ANGSTROM,
     HARTREE_PER_BOHR_TO_MEV_PER_A,
 )
+from .dft_functionals import is_nl_method
 
 bcheck = "✔"
 gear = "⚙"
@@ -225,15 +226,22 @@ def build_displaced_molecules(
     freq_max_imag_cm: float,
     extra_amplitudes_lowest_count: int, extra_amplitude_factor: float,
     logger: logging.Logger,
+    manual_modes: Optional[Dict[str, List[int]]] = None,
 ) -> Dict[str, List[Tuple[str, Molecule, dict]]]:
     """Per system, apply the per-band caps and generate ± displaced Molecules.
 
     Returns ``{struct_name → [(entry_name, Molecule, metadata), ...]}`` where
     ``metadata`` records the (mode_index, amplitude_A, sign, band, frequency_cm)
     of each displacement for downstream logging.
+
+    When ``manual_modes`` maps a structure to an explicit list of 0-based mode
+    indices, those modes are displaced instead of the band-cap auto-selection
+    (each at its own band's amplitude, no extra-amplitude doubling). Structures
+    absent from ``manual_modes`` fall back to :func:`select_modes`.
     """
     band_caps = {b: spec.cap for b, spec in bands.items()}
     band_amps = {b: spec.amplitude_A for b, spec in bands.items()}
+    manual_modes = manual_modes or {}
 
     out: Dict[str, List[Tuple[str, Molecule, dict]]] = {}
     for struct_name, data in mode_data.items():
@@ -242,13 +250,33 @@ def build_displaced_molecules(
         classes = data["classes"]
         mol = data["mol"]
 
-        picks = select_modes(
-            frequencies_cm=freqs, classes=classes,
-            band_caps=band_caps, band_amplitudes=band_amps,
-            freq_max_imag_cm=freq_max_imag_cm,
-            extra_amplitudes_lowest_count=extra_amplitudes_lowest_count,
-            extra_amplitude_factor=extra_amplitude_factor,
-        )
+        if struct_name in manual_modes:
+            picks = []
+            for i in manual_modes[struct_name]:
+                if i < 0 or i >= len(classes):
+                    raise ValueError(
+                        f"manual_modes[{struct_name!r}] has out-of-range mode "
+                        f"index {i} (system has {len(classes)} modes)."
+                    )
+                if abs(float(np.imag(freqs[i]))) > freq_max_imag_cm:
+                    logger.warning(
+                        f"  {struct_name}: manual mode {i} is imaginary "
+                        f"(|imag| > {freq_max_imag_cm} cm⁻¹) — skipping."
+                    )
+                    continue
+                picks.append((i, band_amps[classes[i]], classes[i]))
+            logger.info(
+                f"  {struct_name}: manual mode selection "
+                f"({len(picks)}/{len(manual_modes[struct_name])} indices used)."
+            )
+        else:
+            picks = select_modes(
+                frequencies_cm=freqs, classes=classes,
+                band_caps=band_caps, band_amplitudes=band_amps,
+                freq_max_imag_cm=freq_max_imag_cm,
+                extra_amplitudes_lowest_count=extra_amplitudes_lowest_count,
+                extra_amplitude_factor=extra_amplitude_factor,
+            )
         if not picks:
             logger.warning(
                 f"  {struct_name}: no modes survived selection — skipping."
@@ -335,9 +363,18 @@ def build_nm_sp_datasets(
         # DFT specs
         for functional in all_dft_functionals:
             method, basis = functional.split("_", 1)
+            # VV10 "-V" functionals have no analytic gradient in Psi4; route
+            # them to ORCA with SCNL for the self-consistent non-local
+            # gradient. Everything else uses the configured dft_program.
+            if is_nl_method(method):
+                spec_program = "orca"
+                spec_kw = {"simple_input": "SCNL"}
+            else:
+                spec_program = dft_program
+                spec_kw = dft_kw
             qcf.add_gradient_spec(
                 ds_sp, spec_name=functional, method=method, basis=basis,
-                program=dft_program, keywords=dft_kw,
+                program=spec_program, keywords=spec_kw,
                 description=(
                     f"NM displacement gradient at {functional} for "
                     f"{struct_name}"
@@ -813,6 +850,7 @@ def run_nm_sampling(
         extra_amplitudes_lowest_count=config.extra_amplitudes_lowest_count,
         extra_amplitude_factor=config.extra_amplitude_factor,
         logger=logger,
+        manual_modes=config.manual_modes,
     )
     if not displaced:
         logger.warning("\n  No displacements generated — aborting.\n")
