@@ -5,9 +5,6 @@ import pytest
 from qcelemental.models import Molecule
 
 from beep.core.entry_guard import check_entry_geometry, guard_reused_entries
-from beep.models.be_assemble_periodic import BeAssemblePeriodicConfig
-from beep.models.be_comp_periodic import BeCompPeriodicConfig
-from beep.models.sampling_periodic import SamplingPeriodicConfig
 
 
 def _mol(dz=0.0, symbols=("O", "H", "H")):
@@ -53,11 +50,6 @@ def test_guard_checks_only_reused_names(optimization):
         guard_reused_entries(ds, [("b", _mol())], optimization)
 
 
-def test_suffix_defaults_keep_historical_names():
-    for cfg in (SamplingPeriodicConfig, BeCompPeriodicConfig, BeAssemblePeriodicConfig):
-        assert cfg.model_fields["dataset_suffix"].default == ""
-
-
 def test_periodic_image_counts_as_same_geometry():
     cell = [[31.06, 0, 0], [0, 31.06, 0], [0, 0, 800.0]]
     a = _mol()
@@ -71,7 +63,3 @@ def test_periodic_image_counts_as_same_geometry():
         z = Molecule(symbols=["O", "H", "H"], geometry=[0, 0, 0, 1.8, 0, 0, -0.5, 1.7, 800.0 / 0.529177210903],
                      fix_com=True, fix_orientation=True)
         check_entry_geometry(a, z, "x", "ds", cell_ang=cell, pbc=[True, True, False])
-
-
-def test_resume_from_existing_is_opt_in():
-    assert SamplingPeriodicConfig.model_fields["resume_from_existing"].default is False

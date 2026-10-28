@@ -59,8 +59,7 @@ def test_main_valid_dispatch(mock_connect, monkeypatch, tmp_path):
 
 def test_workflow_models_keys():
     expected = {
-        "sampling", "sampling_periodic",
-        "be_comp_periodic", "be_assemble_periodic",
+        "sampling",
         "be_hess", "extract", "pre_exp",
         "geom_benchmark", "energy_benchmark", "nm_sampling",
         "mbe", "mbe_extract",

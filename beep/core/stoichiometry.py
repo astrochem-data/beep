@@ -4,7 +4,7 @@ Binding energy stoichiometry computation — pure logic.
 Uses qcelemental.models.Molecule (standalone, no QCFractal dependency).
 """
 import logging
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict
 from qcelemental.models.molecule import Molecule
 
 
@@ -88,50 +88,3 @@ def be_stoichiometry(smol_mol: Molecule, cluster_mol: Molecule, struc_mol: Molec
     }
 
     return be_stoic
-
-
-
-def periodic_stoichiometry(complex_mol: Molecule, n_surface_atoms: int,
-                           surface_mol: Optional[Molecule] = None,
-                           gas_mol: Optional[Molecule] = None) -> Dict[str, List[Tuple[Molecule, float]]]:
-    """Stoichiometries of a periodic slab + adsorbate site, one per ReactionDataset suffix:
-
-    - ``ie``: complex - slab - adsorbate, both fragments frozen at the complex geometry
-    - ``be``: complex - relaxed bare surface - gas-phase adsorbate
-    - ``de``: frozen slab + frozen adsorbate - relaxed bare surface - gas-phase adsorbate
-
-    so that BE = IE + DE. Identical molecules within one stoichiometry are merged
-    (:func:`merge_components`), so an entry can have fewer components. Without
-    counterpoise (MLPs have no basis to correct), i.e. the ``ie_nocp``/``be_nocp``/``de``
-    of :func:`be_stoichiometry`. Every component is evaluated with the same periodic
-    specification (cell, pbc), the gas-phase adsorbate included: the adsorbate
-    interacts with its own periodic images in the complex as in the references, and that cancels.
-    The frozen adsorbate keeps its in-complex coordinates (no unwrapping is needed under pbc)
-    and takes the charge and multiplicity of ``gas_mol`` when given. ``be`` and ``de`` need
-    ``surface_mol`` (the bare surface relaxed for this site) and ``gas_mol``.
-    """
-    from .periodic_sampler import adsorbate_fragment, strip_adsorbate
-    slab = strip_adsorbate(complex_mol, n_surface_atoms)
-    ads = adsorbate_fragment(
-        complex_mol, n_surface_atoms,
-        molecular_charge=gas_mol.molecular_charge if gas_mol is not None else None,
-        molecular_multiplicity=gas_mol.molecular_multiplicity if gas_mol is not None else None,
-    )
-    out = {"ie": [(complex_mol, 1.0), (slab, -1.0), (ads, -1.0)]}
-    if surface_mol is not None and gas_mol is not None:
-        out["be"] = [(complex_mol, 1.0), (surface_mol, -1.0), (gas_mol, -1.0)]
-        out["de"] = [(slab, 1.0), (ads, 1.0), (surface_mol, -1.0), (gas_mol, -1.0)]
-    return {k: merge_components(v) for k, v in out.items()}
-
-
-def merge_components(st: List[Tuple[Molecule, float]]) -> List[Tuple[Molecule, float]]:
-    """Combine components that are the same molecule (same hash) by summing their
-    coefficients, and drop those that cancel. A reaction entry cannot hold one molecule
-    twice: e.g. when a bare-surface optimization converged at its first step, the relaxed
-    surface is the frozen slab itself, and the DE's +1 and -1 terms cancel (DE_slab = 0)."""
-    out: Dict[str, Tuple[Molecule, float]] = {}
-    for mol, coef in st:
-        h = mol.get_hash()
-        m, c = out.get(h, (mol, 0.0))
-        out[h] = (m, c + coef)
-    return [(m, c) for m, c in out.values() if c != 0.0]

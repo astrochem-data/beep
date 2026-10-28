@@ -59,11 +59,8 @@ This is the easiest way to create a new configuration file — start from the sc
 | Workflow | Description |
 |----------|-------------|
 | `sampling` | Generate binding-site candidates on water clusters (adaptive surface-anchored or spherical placement), RMSD-filter them and refine the geometries |
-| `sampling_periodic` | Grid-based sampling of binding sites on a periodic slab with MLP-driven optimizations and optional frozen layers |
 | `be_hess` | Submit binding energy (with BSSE) and Hessian computations for the optimized cluster structures |
 | `extract` | Extract binding energies, apply ZPVE corrections, and generate summary tables and plots |
-| `be_comp_periodic` | Submit periodic binding-energy single points (MACE + explicit dispersion) for complex, bare site and gas-phase adsorbate |
-| `be_assemble_periodic` | Assemble per-site periodic binding energies from the completed single points, with optional ZPVE shift |
 | `mbe` | Submit and monitor many-body-expansion binding energies on existing binding sites at a higher level of theory |
 | `mbe_extract` | Assemble MBE binding energies and n-body decomposition tables, optionally borrowing a ZPVE correction from `be_hess` |
 | `pre_exp` | Compute transition-state-theory pre-exponential desorption factors over a temperature range |
@@ -76,11 +73,8 @@ Each workflow has a corresponding example configuration in the [`examples/`](exa
 ```
 examples/
   sampling.json
-  sampling_periodic.json
   be_hess.json
   extract.json
-  be_comp_periodic.json
-  be_assemble_periodic.json
   mbe.json
   mbe_extract.json
   pre_exp.json
@@ -88,6 +82,11 @@ examples/
   energy_benchmark.json
   nm_sampling.json
 ```
+
+Periodic MLP workflows now live in **beep-mlp**. Existing periodic JSON files can be
+run with `beep-mlp sampling_periodic --config input.json` (likewise
+`be_comp_periodic` and `be_assemble_periodic`). Cluster workflows continue to
+support MACE models through `mace_model`.
 
 ## Output
 

@@ -57,9 +57,8 @@ The codebase is organized into four layers:
 - **Adapters** (``beep.adapters``) — Thin wrappers around external services
   (QCFractal server I/O), isolating all network and database access.
 - **Workflows** (``beep.workflows``) — Orchestration layer that ties core logic
-  and adapters together into the twelve user-facing workflows (``sampling``,
-  ``sampling_periodic``, ``be_hess``, ``extract``, ``be_comp_periodic``,
-  ``be_assemble_periodic``, ``mbe``, ``mbe_extract``, ``pre_exp``,
+  and adapters together into the nine user-facing workflows (``sampling``,
+  ``be_hess``, ``extract``, ``mbe``, ``mbe_extract``, ``pre_exp``,
   ``geom_benchmark``, ``energy_benchmark``, ``nm_sampling``).
 
 A single CLI entry point (``beep --config input.json``) dispatches to the

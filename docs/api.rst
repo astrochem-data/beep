@@ -66,10 +66,6 @@ Pure computational logic with no external server dependencies.
    :members:
    :undoc-members:
 
-.. automodule:: beep.core.periodic_sampler
-   :members:
-   :undoc-members:
-
 .. automodule:: beep.core.normal_mode_sampling
    :members:
    :undoc-members:
@@ -123,18 +119,6 @@ Pydantic configuration models for each workflow.
    :members:
    :undoc-members:
 
-.. automodule:: beep.models.sampling_periodic
-   :members:
-   :undoc-members:
-
-.. automodule:: beep.models.be_comp_periodic
-   :members:
-   :undoc-members:
-
-.. automodule:: beep.models.be_assemble_periodic
-   :members:
-   :undoc-members:
-
 .. automodule:: beep.models.nm_sampling
    :members:
    :undoc-members:
@@ -182,18 +166,6 @@ Orchestration layer that ties core logic and adapters together.
    :undoc-members:
 
 .. automodule:: beep.workflows.mbe_extract
-   :members:
-   :undoc-members:
-
-.. automodule:: beep.workflows.sampling_periodic
-   :members:
-   :undoc-members:
-
-.. automodule:: beep.workflows.be_comp_periodic
-   :members:
-   :undoc-members:
-
-.. automodule:: beep.workflows.be_assemble_periodic
    :members:
    :undoc-members:
 

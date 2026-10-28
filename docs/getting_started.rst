@@ -73,16 +73,10 @@ Workflows
      - Description
    * - ``sampling``
      - Generate binding-site candidates on water clusters (adaptive surface-anchored or spherical placement), RMSD-filter them and refine the geometries
-   * - ``sampling_periodic``
-     - Grid-based sampling of binding sites on a periodic slab with MLP-driven optimizations and optional frozen layers
    * - ``be_hess``
      - Submit binding energy (with BSSE) and Hessian computations for the optimized cluster structures
    * - ``extract``
      - Extract binding energies, apply ZPVE corrections, and generate summary tables and plots
-   * - ``be_comp_periodic``
-     - Submit periodic binding-energy single points (MACE + explicit dispersion) for complex, bare site and gas-phase adsorbate
-   * - ``be_assemble_periodic``
-     - Assemble per-site periodic binding energies from the completed single points, with optional ZPVE shift
    * - ``mbe``
      - Submit and monitor many-body-expansion binding energies on existing binding sites at a higher level of theory
    * - ``mbe_extract``
@@ -124,3 +118,8 @@ Running Tests
 
 The test suite covers core logic, models, and workflow integration without
 requiring a running QCFractal server or psi4.
+
+Periodic MLP workflows have moved to ``beep-mlp``. Existing JSON configurations
+can be run with ``beep-mlp sampling_periodic --config input.json``,
+``beep-mlp be_comp_periodic --config input.json`` or
+``beep-mlp be_assemble_periodic --config input.json``.

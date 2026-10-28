@@ -1166,3 +1166,10 @@ configs and the legacy `launch_*.py` scripts no longer work.
    migration script was used.
 
 [0.12.0]: https://github.com/QCMM/beep/releases/tag/v0.12.0
+
+## Periodic workflow migration
+
+Periodic sampling, BE/IE/DE computation and assembly, their configuration models,
+geometry helpers and examples moved to beep-mlp. Use
+`beep-mlp <workflow> --config FILE` with the existing JSON configuration.
+BEEP retains cluster MACE support and shared QCFractal utilities.

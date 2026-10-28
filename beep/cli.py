@@ -7,8 +7,8 @@ Usage:
     beep --schema sampling
 
 The JSON file must contain a "workflow" key that selects which workflow to run.
-Valid workflow values: sampling, sampling_periodic, be_hess, extract,
-be_comp_periodic, be_assemble_periodic, mbe, mbe_extract, pre_exp,
+Valid workflow values: sampling, be_hess, extract,
+mbe, mbe_extract, pre_exp,
 geom_benchmark, energy_benchmark, nm_sampling
 """
 import argparse
@@ -21,9 +21,6 @@ from pydantic import ValidationError
 
 from .models import (
     SamplingConfig,
-    SamplingPeriodicConfig,
-    BeCompPeriodicConfig,
-    BeAssemblePeriodicConfig,
     BeHessConfig,
     ExtractConfig,
     PreExpConfig,
@@ -37,9 +34,6 @@ from .adapters.qcfractal_adapter import connect
 
 WORKFLOW_MODELS = {
     "sampling": SamplingConfig,
-    "sampling_periodic": SamplingPeriodicConfig,
-    "be_comp_periodic": BeCompPeriodicConfig,
-    "be_assemble_periodic": BeAssemblePeriodicConfig,
     "be_hess": BeHessConfig,
     "extract": ExtractConfig,
     "pre_exp": PreExpConfig,
@@ -176,12 +170,6 @@ def main():
     # Import and dispatch to the appropriate workflow
     if workflow == "sampling":
         from .workflows.sampling import run
-    elif workflow == "sampling_periodic":
-        from .workflows.sampling_periodic import run
-    elif workflow == "be_comp_periodic":
-        from .workflows.be_comp_periodic import run
-    elif workflow == "be_assemble_periodic":
-        from .workflows.be_assemble_periodic import run
     elif workflow == "be_hess":
         from .workflows.be_hess import run
     elif workflow == "extract":
