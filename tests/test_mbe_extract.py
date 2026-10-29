@@ -235,3 +235,113 @@ def test_run_supports_multiple_specs(tmp_path, monkeypatch):
     for spec in specs:
         assert (data_dir / f"decomp__{spec}.csv").exists()
         assert (data_dir / f"contrib__{spec}.csv").exists()
+
+
+@pytest.mark.parametrize("scheme,pref", bt.BSSE_PREFIX.items())
+@pytest.mark.parametrize("order", [4, 5, 10])
+def test_higher_order_csvs_and_convergence(tmp_path, monkeypatch, scheme, pref, order):
+    """A small third-order term must not hide a growing final increment."""
+    def props(base, increments):
+        return {"results": {
+            f"{pref}_total_energy_through_1_body": base,
+            **{f"{pref}_{n}_body_contribution_to_energy": v for n, v in increments.items()},
+            f"{pref}_total_energy": base + sum(increments.values()),
+        }}
+
+    surface = {n: 0.01 for n in range(2, order + 1)}
+    # BE increments shrink until the final order, then grow by a factor of 2.
+    increments = {n: 0.1 ** (n - 2) for n in range(2, order)}
+    increments[order] = 2 * increments[order - 1]
+    complex_terms = {n: surface[n] - increments[n] for n in surface}
+    records = {
+        ("surface", "spec"): DummyRecord(props(-10., surface)),
+        ("site", "spec"): DummyRecord(props(-12., complex_terms)),
+    }
+    _patch_collections(monkeypatch, DummyManybodyDataset(records, ["surface", "site"]),
+                       DummySinglepointDataset({("monomer", "monomer_spec"): DummyRecord(return_result=-2.)}))
+    cfg = _make_config(["spec"]).model_copy(update={"bsse": [scheme]})
+    report = ex.assemble_mbe_be(cfg, object(), tmp_path)
+    data = tmp_path / "be_data"
+    cumulative = pd.read_csv(data / "decomp__spec.csv", index_col=0)
+    contrib = pd.read_csv(data / "contrib__spec.csv", index_col=0)
+    total = pd.read_csv(data / "total_be.csv", index_col=0)
+    conv = pd.read_csv(data / "convergence__spec.csv", index_col=0)
+    assert list(cumulative.columns) == [f"BE_{n}b" for n in range(1, order + 1)]
+    assert list(contrib.columns) == [f"BE_{n}b_contrib" for n in range(1, order + 1)]
+    for n in range(2, order + 1):
+        assert contrib.loc["site", f"BE_{n}b_contrib"] == pytest.approx(
+            increments[n] * constants.hartree2kcalmol, abs=1e-8)
+    assert cumulative.loc["site", f"BE_{order}b"] == pytest.approx(total.loc["site", "spec"])
+    assert conv.loc["site", "n_body_max"] == order
+    assert conv.loc["site", "ratio_r"] == pytest.approx(2.)
+    assert not conv.loc["site", "converged"]
+    assert pd.isna(conv.loc["site", "error_bar"])
+    assert f"BE_{order}b_contrib" in report.read_text()
+
+
+def test_missing_higher_reference_is_not_zero_or_lower_order_convergence():
+    sup = {"e1": -12., "e2": -.2, "e3": -.01, "e4": -.002, "etot": -12.212}
+    surf = {"e1": -10., "e2": -.1, "e3": -.005, "etot": -10.105}
+    values = bt.compute_be_values(sup, surf, -2.)
+    assert values["be_4"] is None
+    assert pd.isna(bt.build_cumulative(values)["BE_4b"])
+    assert pd.isna(bt.build_contributions(values)["BE_4b_contrib"])
+    conv = bt.compute_convergence(values)
+    assert conv["n_body_max"] == 4
+    assert conv["error_bar"] is None and conv["converged"] is None
+
+
+def test_extract_reports_missing_increment_and_ignores_other_schemes():
+    rec = DummyRecord({"results": {
+        "nocp_total_energy_through_4_body": -12.,
+        "nocp_total_energy": -12.,
+        "nocp_3_body_contribution_to_energy": -.1,
+        "nocp_4_body_contribution_to_gradient": [0., 0., 0.],
+        "cp_corrected_5_body_contribution_to_energy": -.02,
+    }})
+    result = bt.extract_mbe_components(rec, "nocp")
+    assert result["e4"] is None and result["e3"] == -.1
+    assert "e5" not in result
+    assert result["etot"] == -12.
+
+
+def test_cumulative_missing_intermediate_order_propagates():
+    values = {"be_le1": 1., "be_2": 2., "be_3": None, "be_4": .1, "be_5": .01}
+    result = bt.build_cumulative(values)
+    assert result["BE_2b"] == 3.
+    assert all(pd.isna(result[f"BE_{n}b"]) for n in [3, 4, 5])
+    assert bt.build_contributions(values)["BE_5b_contrib"] == .01
+    assert bt.compute_convergence(values)["error_bar"] is None
+
+
+def test_mixed_orders_and_missing_terms_in_workflow(tmp_path, monkeypatch):
+    pref = "vmfc_corrected"
+    records, sp_records = {}, {}
+    for spec in ["three", "four"]:
+        surface = _properties_for(pref, e1=-10., e2=-.1, e3=-.01, etot=-10.11)
+        complete = _properties_for(pref, e1=-12., e2=-.2, e3=-.02, etot=-12.22)
+        missing = _properties_for(pref, e1=-12., e2=-.2, e3=-.02, etot=-12.22)
+        if spec == "four":
+            surface["results"][f"{pref}_4_body_contribution_to_energy"] = -.001
+            complete["results"][f"{pref}_4_body_contribution_to_energy"] = -.002
+            surface["results"][f"{pref}_total_energy"] -= .001
+            complete["results"][f"{pref}_total_energy"] -= .002
+        records[("surface", spec)] = DummyRecord(surface)
+        records[("complete", spec)] = DummyRecord(complete)
+        records[("missing", spec)] = DummyRecord(missing)
+        sp_records[("monomer", f"monomer_{spec}")] = DummyRecord(return_result=-2.)
+    _patch_collections(monkeypatch, DummyManybodyDataset(records, ["surface", "missing", "complete"]),
+                       DummySinglepointDataset(sp_records))
+    report = ex.assemble_mbe_be(_make_config(["three", "four"]), object(), tmp_path)
+    data = tmp_path / "be_data"
+    three = pd.read_csv(data / "decomp__three.csv", index_col=0)
+    four = pd.read_csv(data / "decomp__four.csv", index_col=0)
+    conv = pd.read_csv(data / "convergence__four.csv", index_col=0)
+    assert list(three.columns) == ["BE_1b", "BE_2b", "BE_3b"]
+    assert list(four.columns) == ["BE_1b", "BE_2b", "BE_3b", "BE_4b"]
+    assert pd.isna(four.loc["missing", "BE_4b"])
+    assert conv.loc["missing", "n_body_max"] == 4
+    assert pd.isna(conv.loc["missing", "converged"])
+    assert conv.loc["complete", "ratio_r"] == pytest.approx(.1)
+    assert conv.loc["complete", "converged"]
+    assert "n/a (not estimable)" in report.read_text()

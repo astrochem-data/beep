@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`mbe_extract`: higher-order decomposition and convergence.** Extraction
+  now retains every reported n-body energy contribution for CP, NOCP and VMFC,
+  and writes cumulative and per-order CSV/report columns beyond third order.
+  The geometric-tail estimate uses the highest two adjacent interaction
+  increments. Missing/non-finite terms or a zero denominator leave the
+  estimate unavailable instead of falling back to a misleading lower-order
+  ratio. Existing first-through-third-order column names are preserved.
+
 - **`pre_exp`: atoms got a zero prefactor.** With all three moments of
   inertia zero, `is_linear_rotor(0, 0)` is false and the nonlinear branch
   multiplied by `sqrt(Ia Ib Ic) = 0`, so `pre_exponential_factor` returned

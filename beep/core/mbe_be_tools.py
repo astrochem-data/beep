@@ -8,10 +8,11 @@ issues only read-only calls (it never submits or mutates datasets).
 Sign / unit conventions (load-bearing, preserved from beep-mbe):
   * binding energy = negative of the (complex - fragments) energy difference
   * energies are converted Hartree -> kcal/mol
-  * ``BE_1b/2b/3b`` are cumulative; ``*_contrib`` are per-body increments
+  * ``BE_Nb`` columns are cumulative; ``*_contrib`` are per-body increments
 """
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -122,28 +123,30 @@ def _convert_energy(value: Optional[float], factor: float) -> Optional[float]:
 
 
 def extract_mbe_components(rec, pref: str) -> Dict[str, Optional[float]]:
-    """Pull per-order energies from a ManybodyRecord's properties."""
-    # TODO(nbody): capped at 3-body. Submission already supports arbitrary
-    # contiguous 1..N levels (qcmanybody computes them), but the decomposition
-    # here reads only the 1/2/3-body keys, so a 4-body+ run keeps a correct
-    # `etot` (from `_total_energy`) while silently dropping Δ₄⁺ from the
-    # decomposition and the convergence estimate. To lift the cap, read
-    # `{pref}_{k}_body_contribution_to_energy` for every k up to the run's max
-    # order and make compute_be_values / build_cumulative / build_contributions /
-    # compute_convergence iterate over the available orders. This is additive:
-    # 3-body runs lack the k≥4 keys, so existing output stays byte-identical.
-    # Confirm qcmanybody's exact property key for k≥4 against a real record first.
+    """Pull every reported order for the selected BSSE scheme.
+
+    Keep the historical e1/e2/e3 keys for lower-order reports. A reported
+    cumulative order without its increment remains missing, never zero.
+    """
     props = getattr(rec, "properties", None) or {}
     results = props.get("results", {}) or {}
-
-    e1 = results.get(f"{pref}_total_energy_through_1_body")
-    e2 = results.get(f"{pref}_2_body_contribution_to_energy")
-    e3 = results.get(f"{pref}_3_body_contribution_to_energy")
-    etot = results.get(f"{pref}_total_energy")
-    if etot is None:
-        etot = props.get("ret_energy")
-
-    return {"e1": e1, "e2": e2, "e3": e3, "etot": etot}
+    pattern = re.compile(
+        rf"{re.escape(pref)}_(?:(\d+)_body_contribution_to_energy|total_energy_through_(\d+)_body)"
+    )
+    orders = {1, 2, 3}
+    for key in results:
+        match = pattern.fullmatch(key)
+        if match:
+            orders.add(int(match.group(1) or match.group(2)))
+    components = {
+        f"e{n}": results.get(f"{pref}_total_energy_through_1_body" if n == 1
+                            else f"{pref}_{n}_body_contribution_to_energy")
+        for n in range(1, max(orders) + 1)
+    }
+    components["etot"] = results.get(f"{pref}_total_energy")
+    if components["etot"] is None:
+        components["etot"] = props.get("ret_energy")
+    return components
 
 
 def extract_monomer_energy(rec) -> float:
@@ -167,66 +170,43 @@ def compute_be_values(
     monomer_energy: float,
 ) -> Dict[str, Optional[float]]:
     """Binding energies (Hartree, BE-sign) from complex/surface MBE components."""
-    e1_super = super_components.get("e1")
-    e1_surf = surface_components.get("e1")
-    e2_super = super_components.get("e2")
-    e2_surf = surface_components.get("e2")
-    e3_super = super_components.get("e3")
-    e3_surf = surface_components.get("e3")
-    etot_super = super_components.get("etot")
-    etot_surf = surface_components.get("etot")
+    orders = [int(k[1:]) for components in (super_components, surface_components)
+              for k in components if re.fullmatch(r"e[1-9]\d*", k)]
+    values = {}
+    for n in range(1, max([3, *orders]) + 1):
+        sup, surf = super_components.get(f"e{n}"), surface_components.get(f"e{n}")
+        key = "be_le1" if n == 1 else f"be_{n}"
+        values[key] = (None if sup is None or surf is None
+                       else -(sup - (surf + monomer_energy if n == 1 else surf)))
+    sup, surf = super_components.get("etot"), surface_components.get("etot")
+    values["be_total"] = None if sup is None or surf is None else -(sup - (surf + monomer_energy))
+    return values
 
-    be_le1 = None
-    if e1_super is not None and e1_surf is not None:
-        be_le1 = -(e1_super - (e1_surf + monomer_energy))
 
-    be_2 = None
-    if e2_super is not None and e2_surf is not None:
-        be_2 = -(e2_super - e2_surf)
-
-    be_3 = None
-    if e3_super is not None and e3_surf is not None:
-        be_3 = -(e3_super - e3_surf)
-
-    be_total = None
-    if etot_super is not None and etot_surf is not None:
-        be_total = -(etot_super - (etot_surf + monomer_energy))
-
-    return {"be_le1": be_le1, "be_2": be_2, "be_3": be_3, "be_total": be_total}
+def _be_orders(values: Dict[str, Optional[float]]) -> List[int]:
+    """Orders represented in a BE mapping, including missing higher terms."""
+    return sorted(int(k[3:]) for k in values
+                  if re.fullmatch(r"be_[1-9]\d*", k) and int(k[3:]) >= 2)
 
 
 def build_cumulative(values: Dict[str, Optional[float]]) -> Dict[str, float]:
-    """Cumulative n-body BEs: BE_1b, BE_1b+2b, BE_1b+2b+3b (NaN-propagating)."""
-    c1 = values.get("be_le1")
-    c2 = values.get("be_2")
-    c3 = values.get("be_3")
-
-    be_1b = c1
-    if c1 is None:
-        be_2b = None
-        be_3b = None
-    else:
-        if c2 is None:
-            be_2b = None
-            be_3b = None
-        else:
-            be_2b = c1 + c2
-            be_3b = None if c3 is None else c1 + c2 + c3
-
-    return {
-        "BE_1b": float("nan") if be_1b is None else float(be_1b),
-        "BE_2b": float("nan") if be_2b is None else float(be_2b),
-        "BE_3b": float("nan") if be_3b is None else float(be_3b),
-    }
+    """Cumulative n-body BEs through every reported order; gaps propagate NaN."""
+    cumulative = 0.0
+    out = {}
+    for n in range(1, max([3, *_be_orders(values)]) + 1):
+        term = values.get("be_le1" if n == 1 else f"be_{n}")
+        cumulative += float("nan") if term is None else float(term)
+        out[f"BE_{n}b"] = cumulative
+    return out
 
 
 def build_contributions(values: Dict[str, Optional[float]]) -> Dict[str, float]:
-    """Per-body BE increments (not cumulative)."""
-    return {
-        "BE_1b_contrib": float("nan") if values.get("be_le1") is None else float(values["be_le1"]),
-        "BE_2b_contrib": float("nan") if values.get("be_2") is None else float(values["be_2"]),
-        "BE_3b_contrib": float("nan") if values.get("be_3") is None else float(values["be_3"]),
-    }
+    """Per-body BE increments through every reported order (not cumulative)."""
+    out = {}
+    for n in range(1, max([3, *_be_orders(values)]) + 1):
+        term = values.get("be_le1" if n == 1 else f"be_{n}")
+        out[f"BE_{n}b_contrib"] = float("nan") if term is None else float(term)
+    return out
 
 
 def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -> Dict[str, Any]:
@@ -234,9 +214,9 @@ def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -
 
     The binding energy is the many-body sum ``BE = Δ₁ + Δ₂ + Δ₃ + …`` where
     ``Δ₁ = be_le1`` (monomer deformation), ``Δ₂ = be_2`` (2-body) and
-    ``Δ₃ = be_3`` (3-body). The uncomputed tail (Δ₄ + …) is estimated by
+    ``Δ₃ = be_3`` (3-body). The uncomputed tail beyond the highest reported order is estimated by
     assuming the interaction increments keep shrinking geometrically at the
-    rate seen between the two highest computed orders:
+    rate seen between the two highest computed orders::
 
         r    = |Δₙ / Δₙ₋₁|                 (interaction increments only)
         bar  = |Δₙ| · r / (1 − r)          (magnitude of the geometric tail)
@@ -247,7 +227,7 @@ def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -
     the *magnitude* of the decay is inferable.
 
     Requirements / edge cases:
-      * needs two interaction increments (Δ₂ and Δ₃), i.e. a 3-body run. A
+      * needs a complete interaction series through order N >= 3. A
         2-body-only run has no ratio → ``error_bar`` is ``None`` ("n/a"): a
         2-body calculation carries no information about its own convergence.
       * ``|r| ≥ 1`` (increment did not shrink) → not converging → ``error_bar``
@@ -258,17 +238,13 @@ def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -
     ``error_bar`` (kcal/mol, or ``None``), ``rel_error`` (or ``None``) and
     ``converged`` (``bool`` or ``None`` when not estimable).
     """
-    d2 = values.get("be_2")
-    d3 = values.get("be_3")
     be_total = values.get("be_total")
-
-    # Highest computed body order (1 = deformation only).
-    if d3 is not None:
-        n_body_max = 3
-    elif d2 is not None:
-        n_body_max = 2
-    else:
-        n_body_max = 1
+    # be_2/be_3 are historical placeholders. Higher keys denote reported orders,
+    # even if a missing reference prevents their BE increment being computed.
+    orders = [n for n in _be_orders(values) if n > 3 or values.get(f"be_{n}") is not None]
+    n_body_max = max([1, *orders])
+    last = values.get(f"be_{n_body_max}")
+    previous = values.get(f"be_{n_body_max - 1}")
 
     result: Dict[str, Any] = {
         "n_body_max": n_body_max,
@@ -279,13 +255,14 @@ def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -
         "converged": None,
     }
 
-    # Need two interaction increments (Δ₂, Δ₃) to form a decay ratio.
-    if d2 is None or d3 is None or d2 == 0.0:
-        result["delta_last"] = d3 if d3 is not None else d2
+    result["delta_last"] = last
+    # Do not fall back to a lower-order ratio when higher terms are missing.
+    terms = [values.get(f"be_{n}") for n in range(2, n_body_max + 1)]
+    if (n_body_max < 3 or any(v is None or not math.isfinite(v) for v in terms)
+            or previous == 0.0):
         return result
 
-    r = abs(d3 / d2)
-    result["delta_last"] = d3
+    r = abs(last / previous)
     result["ratio_r"] = r
 
     if r >= 1.0:
@@ -293,9 +270,9 @@ def compute_convergence(values: Dict[str, Optional[float]], tol: float = 0.05) -
         result["converged"] = False
         return result
 
-    bar = abs(d3) * r / (1.0 - r)
+    bar = abs(last) * r / (1.0 - r)
     result["error_bar"] = bar
-    if be_total is not None and be_total != 0.0:
+    if be_total is not None and math.isfinite(be_total) and be_total != 0.0:
         rel = bar / abs(be_total)
         result["rel_error"] = rel
         result["converged"] = rel < tol
@@ -352,7 +329,8 @@ def format_convergence_table(conv_by_entry: Dict[str, Dict[str, Any]]) -> str:
         conv = c.get("converged")
         be = c.get("BE_total")
         if bar is None:
-            bar_str = "n/a (2b)" if n == 2 else "n/a (not conv.)"
+            bar_str = ("n/a (2b)" if n == 2 else
+                       "n/a (not conv.)" if conv is False else "n/a (not estimable)")
         else:
             bar_str = f"± {bar:.6f}"
         conv_str = {True: "yes", False: "no", None: "-"}[conv]

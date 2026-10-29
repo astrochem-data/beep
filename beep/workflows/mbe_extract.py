@@ -143,16 +143,16 @@ def assemble_mbe_be(config: MbeExtractConfig, client: FractalClient, res_folder:
             )
 
     df_total_be = pd.DataFrame.from_dict(total_data, orient="index", columns=specs).reindex(entry_names)
-    df_decomp = {
-        spec: pd.DataFrame.from_dict(v, orient="index", columns=["BE_1b", "BE_2b", "BE_3b"]).reindex(entry_names)
-        for spec, v in decomp_by_spec.items()
-    }
-    df_contrib = {
-        spec: pd.DataFrame.from_dict(
-            v, orient="index", columns=["BE_1b_contrib", "BE_2b_contrib", "BE_3b_contrib"]
-        ).reindex(entry_names)
-        for spec, v in contrib_by_spec.items()
-    }
+    # Union of per-site orders, sorted numerically (including orders >= 10).
+    # Lower-order sites retain NaN in columns reported only by other sites.
+    df_decomp, df_contrib = {}, {}
+    for spec in specs:
+        columns = sorted({col for row in decomp_by_spec[spec].values() for col in row},
+                         key=lambda col: int(col[3:-1]))
+        df_decomp[spec] = pd.DataFrame.from_dict(decomp_by_spec[spec], orient="index").reindex(
+            index=entry_names, columns=columns)
+        df_contrib[spec] = pd.DataFrame.from_dict(contrib_by_spec[spec], orient="index").reindex(
+            index=entry_names, columns=[f"{col}_contrib" for col in columns])
 
     # --- MBE truncation-error / convergence estimate (symmetric geometric bar) ---
     conv_columns = ["BE_total", "n_body_max", "delta_last", "ratio_r",

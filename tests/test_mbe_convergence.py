@@ -74,3 +74,22 @@ def test_format_convergence_table_handles_na():
     assert "± 0.023400" in txt
     assert "n/a (2b)" in txt
     assert "yes" in txt
+
+
+@pytest.mark.parametrize("last", [.02, -.02, 0.])
+def test_four_body_tail_uses_fourth_and_third_orders(last):
+    values = {"be_le1": -.1, "be_2": 1., "be_3": .1, "be_4": last, "be_total": 1. + last}
+    c = compute_convergence(values)
+    r = abs(last / .1)
+    assert c["n_body_max"] == 4
+    assert c["delta_last"] == last
+    assert c["ratio_r"] == pytest.approx(r)
+    assert c["error_bar"] == pytest.approx(abs(last) * r / (1 - r))
+    assert c["converged"] is True
+
+
+@pytest.mark.parametrize("previous", [0., None, float("nan"), float("inf")])
+def test_four_body_tail_requires_finite_nonzero_previous(previous):
+    c = compute_convergence({"be_2": 1., "be_3": previous, "be_4": .02, "be_total": 1.})
+    assert c["n_body_max"] == 4
+    assert c["error_bar"] is None and c["converged"] is None
