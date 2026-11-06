@@ -50,11 +50,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/QCMM/beep"
+Homepage = "https://github.com/astrochem-data/beep"
 Documentation = "https://beep.readthedocs.io"
-Repository = "https://github.com/QCMM/beep"
-Issues = "https://github.com/QCMM/beep/issues"
-Changelog = "https://github.com/QCMM/beep/blob/main/CHANGELOG.md"
+Repository = "https://github.com/astrochem-data/beep"
+Issues = "https://github.com/astrochem-data/beep/issues"
+Changelog = "https://github.com/astrochem-data/beep/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 pre_exp = ["molsym"]

@@ -14,7 +14,7 @@ Clone the repository and install with pip:
 
 .. code-block:: bash
 
-   git clone https://github.com/QCMM/beep.git
+   git clone https://github.com/astrochem-data/beep.git
    cd beep
    pip install .
 
