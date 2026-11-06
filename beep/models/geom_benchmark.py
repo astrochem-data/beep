@@ -55,6 +55,15 @@ class GeomBenchmarkConfig(BaseModel):
     )
     _dep_dft_optimization_keyword = deprecated_null_only("dft_optimization_keyword", "qc_keywords")
     tag_dft_geometry: Optional[str] = Field(None, description="Queue tag for DFT geometry tasks")
+    tag_nl_geometry: Optional[str] = Field(
+        None,
+        description=(
+            "Queue tag for the VV10 '-V' (ORCA) tasks when "
+            "include_nl_functionals is set. ORCA typically runs on a "
+            "separate manager, so point this at that manager's tag. "
+            "Falls back to tag_dft_geometry when unset."
+        ),
+    )
     use_initial_reference_geometry: bool = Field(False, description="Use initial (unoptimized) reference geometry")
     trajectory_analysis: bool = Field(
         True,
@@ -114,6 +123,17 @@ class GeomBenchmarkConfig(BaseModel):
             "trajectory_analysis is enabled) trajectory force-error "
             "histograms + violin plot as SVG under data/plots/. Off by "
             "default — JSON results are always written."
+        ),
+    )
+
+    include_nl_functionals: bool = Field(
+        False,
+        description=(
+            "Also benchmark VV10 '-V' functionals (B97M-V, WB97M-V, WB97X-V "
+            "at def2-tzvpd). These are routed to the ORCA driver with SCNL "
+            "(program=orca, keywords={'simple_input': 'SCNL'}), regardless of "
+            "dft_optimization_program, because Psi4 has no analytic VV10 "
+            "gradient. Off by default."
         ),
     )
 

@@ -38,6 +38,7 @@ from .trajectory_metrics import (
     decompose_force_errors_rigid, summarize_force_decomposition,
     FORCE_PART_KEYS,
 )
+from .dft_functionals import is_nl_method
 
 BOHR_TO_ANGSTROM = 0.529177210903
 
@@ -127,13 +128,19 @@ def build_trajectory_sp_datasets(
 
         for functional in all_dft_functionals:
             method, basis = functional.split("_", 1)
+            # VV10 "-V" methods need ORCA+SCNL for a complete gradient;
+            # everything else uses the configured program.
+            if is_nl_method(method):
+                spec_program, spec_kw = "orca", {"simple_input": "SCNL"}
+            else:
+                spec_program, spec_kw = program, kw
             qcf.add_gradient_spec(
                 ds_sp,
                 spec_name=functional,
                 method=method,
                 basis=basis,
-                program=program,
-                keywords=kw,
+                program=spec_program,
+                keywords=spec_kw,
                 description=(
                     f"SP+gradient on ref trajectory geometry "
                     f"for {functional}"
@@ -149,24 +156,39 @@ def build_trajectory_sp_datasets(
 
 def submit_trajectory_singlepoints(
     traj_dsets: dict, all_dft_functionals: List[str],
-    tag: str, logger: logging.Logger,
+    tag: str, logger: logging.Logger, tag_nl: str = None,
 ):
     """Submit all (entry × spec) SP+gradient pairs.
 
     Assumes ``all_dft_functionals`` is already lowercased (per the
     convention applied at the top of ``run_trajectory_analysis``,
     matching be_hess / energy_benchmark / sampling).
+
+    VV10 "-V" specs (``is_nl_method``) are ORCA/SCNL jobs and go to
+    ``tag_nl`` (an ORCA manager's tag); everything else goes to ``tag``.
     """
+    nl_specs = [s for s in all_dft_functionals if is_nl_method(s.split("_", 1)[0])]
+    std_specs = [s for s in all_dft_functionals if s not in nl_specs]
+    groups = [(std_specs, tag)]
+    if nl_specs:
+        groups.append((nl_specs, tag_nl or tag))
     inserted = existing = 0
-    for ds_sp in traj_dsets.values():
-        meta = qcf.submit_singlepoints_in_dataset(
-            ds_sp, spec_names=all_dft_functionals, tag=tag,
+    for specs, grp_tag in groups:
+        if not specs:
+            continue
+        for ds_sp in traj_dsets.values():
+            meta = qcf.submit_singlepoints_in_dataset(
+                ds_sp, spec_names=specs, tag=grp_tag,
+            )
+            inserted += getattr(meta, "n_inserted", 0)
+            existing += getattr(meta, "n_existing", 0)
+        logger.info(
+            f"  Submitted {len(specs)} spec(s) across "
+            f"{len(traj_dsets)} system(s) to tag '{grp_tag}'."
         )
-        inserted += getattr(meta, "n_inserted", 0)
-        existing += getattr(meta, "n_existing", 0)
     logger.info(
-        f"  Submitted {inserted} new SP+gradient computations "
-        f"({existing} already existed) to tag '{tag}'."
+        f"  Total: {inserted} new SP+gradient computations "
+        f"({existing} already existed)."
     )
     return inserted, existing
 
@@ -421,12 +443,13 @@ def run_trajectory_analysis(
         dft_program, dft_keyword, logger,
     )
 
+    tag_nl = getattr(config, "tag_nl_geometry", None) or dft_tag
     logger.info(
         f"\nSubmitting trajectory SP+gradient computations to tag "
-        f"'{dft_tag}'…"
+        f"'{dft_tag}' (VV10 '-V' -> '{tag_nl}')…"
     )
     submit_trajectory_singlepoints(
-        traj_dsets, all_dft_functionals, dft_tag, logger,
+        traj_dsets, all_dft_functionals, dft_tag, logger, tag_nl=tag_nl,
     )
 
     logger.info("\nWaiting for trajectory SPs to complete…")

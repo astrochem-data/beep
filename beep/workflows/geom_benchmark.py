@@ -16,6 +16,7 @@ from ..core.logging_utils import (
 )
 from ..core.dft_functionals import (
     geom_hmgga_dz, geom_hmgga_tz, geom_gga_dz, geom_gga_tz, geom_sqm_mb,
+    geom_nl, is_nl_method,
 )
 from ..core.plotting_utils import rmsd_histograms
 from ..core.benchmark_utils import compute_rmsd
@@ -318,6 +319,12 @@ def run(config: GeomBenchmarkConfig, client: FractalClient) -> None:
         "geom_sqm_mb": geom_sqm_mb(),
     }
 
+    # Optional VV10 "-V" group, routed to ORCA+SCNL below and in the
+    # trajectory SP builder (Psi4 has no analytic VV10 gradient).
+    if config.include_nl_functionals:
+        dft_geom_functionals["geom_nl"] = geom_nl()
+        logger.info("include_nl_functionals=True -> adding VV10 '-V' group (ORCA+SCNL)")
+
     all_dft_functionals = [
         functional
         for functionals in dft_geom_functionals.values()
@@ -337,9 +344,18 @@ def run(config: GeomBenchmarkConfig, client: FractalClient) -> None:
         for functionals in dft_geom_functionals.values():
             for functional in functionals:
                 method, basis = functional.split("_", 1)
+                # VV10 "-V" methods need ORCA's self-consistent non-local
+                # (SCNL) for a complete gradient; everything else uses the
+                # configured dft_program.
+                if is_nl_method(method):
+                    spec_program, spec_kw = "orca", {"simple_input": "SCNL"}
+                    opt_tag = config.tag_nl_geometry or dft_tag
+                else:
+                    spec_program, spec_kw = dft_program, dft_keyword
+                    opt_tag = dft_tag
                 meta = optimize_dft_molecule(
                     client, odset, struct_name, method, basis,
-                    dft_program, dft_keyword, dft_tag,
+                    spec_program, spec_kw, opt_tag,
                 )
                 n = getattr(meta, 'n_inserted', 0) + getattr(meta, 'n_existing', 0)
                 cs += n
