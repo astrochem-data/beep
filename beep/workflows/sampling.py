@@ -536,13 +536,17 @@ def run(config: SamplingConfig, client: FractalClient) -> None:
                 client, ds_smplg, ds_ref, opt_lot, args_dict["target_mol"],
                 config.rmsd_value, config.rmsd_symmetry, logger,
             )
-            if harvested[w]:
-                _submit_refinement(ds_ref)
             refined[w] = len(ds_ref.entry_names)
             logger.info(
                 f"  {bcheck} {w}: +{harvested[w]} new unique site(s), "
                 f"{refined[w]} refined total"
             )
+    # Entries may outlive an interrupted submission or predate the requested
+    # refinement LOT. Idempotent submission fills missing records in either case.
+    for w in cluster_names:
+        if refined[w]:
+            _submit_refinement(datasets[w][1])
+
     count = sum(refined.values())
     logger.info(f"\n  Binding sites after harvest: {count} / target {target}")
 

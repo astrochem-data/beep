@@ -444,8 +444,68 @@ def test_run_relaunch_does_not_resample_when_target_already_met(tmp_path, monkey
     assert run_sampling.call_count == 0
     # every cluster with sampling entries is harvested, even the ones after the target
     assert harvest.call_count == 2
-    # nothing new was found, so no refinement resubmission either
-    assert refine.call_count == 0
+    # Ensure calculations exist even when harvesting adds no new geometries.
+    assert refine.call_count == 2
+
+
+@pytest.mark.parametrize("has_sampling_entries", [False, True])
+@pytest.mark.parametrize("scenario", ["interrupted_submission", "new_level", "already_complete"])
+def test_resume_ensures_refinement_records_before_finishing(
+    tmp_path, monkeypatch, has_sampling_entries, scenario,
+):
+    from beep.workflows import sampling as wf
+
+    monkeypatch.chdir(tmp_path)
+    cfg = _resume_config(total=1)
+    old_lot = cfg.refinement_level_of_theory.lot_name
+    if scenario == "new_level":
+        cfg.refinement_level_of_theory = cfg.refinement_level_of_theory.model_copy(
+            update={"method": "b3lyp"},
+        )
+    requested_lot = cfg.refinement_level_of_theory.lot_name
+    dsets = _empty_datasets(["W3_01", "W3_02"])
+    ds_ref = dsets["CO_W3_01"]
+    ds_ref.entry_names = ["CO_W3_01_0001"]
+    if has_sampling_entries:
+        dsets["pre_CO_W3_01"].entry_names = list(ds_ref.entry_names)
+    records = {} if scenario == "interrupted_submission" else {old_lot: [101]}
+    original_records = dict(records)
+    inserted = []
+
+    def submit(ds, lot, tag):
+        assert ds is ds_ref
+        assert lot == requested_lot
+        if lot not in records:
+            records[lot] = [102]
+            inserted.append(102)
+        return MagicMock(n_inserted=len(inserted), n_existing=int(not inserted))
+
+    surface = MagicMock()
+    surface.entry_names = ["W3_01", "W3_02"]
+    target = MagicMock()
+    target.symbols = ["C", "O"]
+    with patch.object(wf, "qcf") as qcf, patch.object(wf, "run_sampling") as sample:
+        qcf.get_collection.return_value = surface
+        qcf.fetch_initial_molecule.return_value = target
+        qcf.get_or_create_opt_dataset.side_effect = lambda client, name: dsets[name]
+        qcf.get_job_ids.side_effect = lambda ds, entries, lot: records.get(lot, []) if ds is ds_ref else []
+        qcf.submit_optimizations.side_effect = submit
+        qcf.check_for_completion.return_value = (True, {"COMPLETE": 1})
+
+        wf.run(cfg, MagicMock())
+
+    sample.assert_not_called()
+    qcf.submit_optimizations.assert_called_once_with(ds_ref, requested_lot, tag=cfg.refinement_tag)
+    qcf.add_opt_specification.assert_called_once()
+    spec = qcf.add_opt_specification.call_args.args[1]
+    assert spec["name"] == requested_lot
+    assert spec["qc_spec"]["method"] == cfg.refinement_level_of_theory.qc_method
+    assert len(inserted) == (0 if scenario == "already_complete" else 1)
+    for lot, ids in original_records.items():
+        assert records[lot] == ids
+    qcf.wait_for_completion.assert_called_once()
+    assert qcf.wait_for_completion.call_args.args[1] == records[requested_lot]
+    qcf.reset_records.assert_not_called()
 
 
 def test_run_harvest_counts_before_top_up(tmp_path, monkeypatch):
@@ -493,7 +553,7 @@ def test_run_tops_up_only_while_below_target(tmp_path, monkeypatch):
     assert run_sampling.call_count == 2
     sampled = [c.kwargs["sampling_opt_dset"].name for c in run_sampling.call_args_list]
     assert sampled == ["pre_CO_W3_02", "pre_CO_W3_03"]
-    assert refine.call_count == 2
+    assert refine.call_count == 3  # stored W3_01 entries, then the two fresh clusters
 
 
 def test_run_top_up_visits_never_sampled_clusters_first(tmp_path, monkeypatch):
