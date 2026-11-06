@@ -91,7 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   first and topping up already-sampled ones only if the target is still
   unmet after every cluster has had one round (a second round on a
   sampled cluster mostly rediscovers minima the filter already
-  removed). The sampling summary now covers
+  removed). After harvesting, refinement is resubmitted for every
+  cluster with refined entries (idempotent), so sites registered by a
+  run that died before submitting refinement, or a changed
+  `refinement_level_of_theory`, get their records on resume. The
+  sampling summary now covers
   all clusters and reports how many sites each one contributed by
   harvesting. Datasets and entry names are unchanged, so existing runs
   resume as they are. Regression tests cover the no-resample, harvest-
