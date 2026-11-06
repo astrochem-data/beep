@@ -13,6 +13,65 @@ QC_KEYWORDS_DESCRIPTION = (
 )
 
 
+FRAGMENTS_DESCRIPTION = (
+    "Per-benchmark-structure fragment partition. Keys must cover every "
+    "entry in ``benchmark_structures`` exactly; each value is a list of "
+    "0-indexed atom-index lists matching the shape of "
+    "``qcel.Molecule.fragments``. Every atom must appear in exactly one "
+    "fragment. Use one fragment per monomer — collapsing multiple "
+    "monomers into a single rigid block mislabels intra-block "
+    "rearrangements as intramolecular. Example (water trimer, 9 atoms, "
+    "three monomers): ``{\"h2o_3\": [[0,1,2], [3,4,5], [6,7,8]]}``."
+)
+
+
+def validate_fragment_partition(fragments, benchmark_structures):
+    """Check a ``{structure → [[atom idx, ...], ...]}`` partition.
+
+    Keys must match ``benchmark_structures`` exactly; every fragment must
+    be non-empty, indices non-negative and disjoint across fragments.
+    The atom count itself can only be checked against the stored
+    molecule at run time.
+    """
+    if not fragments:
+        raise ValueError("fragments must be non-empty.")
+    expected = set(benchmark_structures)
+    missing = expected - set(fragments.keys())
+    extra = set(fragments.keys()) - expected
+    if missing:
+        raise ValueError(
+            f"fragments is missing entries for benchmark structure(s): "
+            f"{sorted(missing)}."
+        )
+    if extra:
+        raise ValueError(
+            f"fragments has entries for structure(s) not in "
+            f"benchmark_structures: {sorted(extra)}."
+        )
+    for struct_name, partition in fragments.items():
+        if not partition:
+            raise ValueError(f"fragments[{struct_name!r}] is empty.")
+        seen: set = set()
+        for i, frag in enumerate(partition):
+            if not frag:
+                raise ValueError(
+                    f"fragments[{struct_name!r}][{i}] is empty."
+                )
+            for a in frag:
+                if a < 0:
+                    raise ValueError(
+                        f"fragments[{struct_name!r}][{i}] contains negative "
+                        f"atom index {a}."
+                    )
+                if a in seen:
+                    raise ValueError(
+                        f"atom index {a} appears in more than one fragment "
+                        f"for {struct_name!r} — fragments must be disjoint."
+                    )
+                seen.add(a)
+    return fragments
+
+
 def deprecated_null_only(old: str, new: str):
     """Validator for a removed config field: null passes, anything else errors pointing to `new`.
 

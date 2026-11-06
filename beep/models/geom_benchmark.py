@@ -1,8 +1,11 @@
 """Geometry benchmark workflow config — entry-based, single OptimizationDataset."""
 from typing import Optional, Literal, List, Dict, Any
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
-from .base import ServerConfig, QC_KEYWORDS_DESCRIPTION, deprecated_null_only
+from .base import (
+    ServerConfig, QC_KEYWORDS_DESCRIPTION, FRAGMENTS_DESCRIPTION,
+    deprecated_null_only, validate_fragment_partition,
+)
 
 
 class GeomBenchmarkConfig(BaseModel):
@@ -66,6 +69,33 @@ class GeomBenchmarkConfig(BaseModel):
             "legacy eq-geometry-only behaviour."
         ),
     )
+    fragments: Optional[Dict[str, List[List[int]]]] = Field(
+        None,
+        description=(
+            "Optional, used by the trajectory force benchmark. "
+            + FRAGMENTS_DESCRIPTION
+            + " When given, the force error at every trajectory step is "
+            "split per fragment into its rigid-body part (net force and "
+            "torque on the fragment, which by Newton's third law is purely "
+            "intermolecular) and the intramolecular remainder, so the stiff "
+            "bond-stretch errors that dominate the total force RMSD can be "
+            "separated from the intermolecular ones. Without it only the "
+            "total per-component force RMSD is reported."
+        ),
+    )
+    ranking_metric: Literal["total", "intermolecular"] = Field(
+        "intermolecular",
+        description=(
+            "Force metric that enters the combined z-score ranking as "
+            "``rmsd_force`` (together with ``rmsd_eq``) and sorts the "
+            "decomposition table. 'intermolecular' (default) = RMSD of the "
+            "net force per fragment, the part relevant to binding; requires "
+            "``fragments`` and falls back to 'total' with a warning when "
+            "they are absent. 'total' = RMSD over every Cartesian force "
+            "component (the pre-2026-11 behaviour), dominated by stiff bond "
+            "stretches."
+        ),
+    )
     score_weights: Dict[str, float] = Field(
         default_factory=lambda: {
             "rmsd_eq": 1.0,
@@ -86,6 +116,12 @@ class GeomBenchmarkConfig(BaseModel):
             "default — JSON results are always written."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_fragments(self):
+        if self.fragments is not None:
+            validate_fragment_partition(self.fragments, self.benchmark_structures)
+        return self
 
     @field_validator("reference_geometry_level_of_theory")
     @classmethod

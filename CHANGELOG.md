@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — 0.16.0.dev
 
+### Added
+
+- **`geom_benchmark`: intermolecular / intramolecular decomposition of
+  the trajectory force benchmark.** The trajectory force RMSD pooled
+  every Cartesian component, so it was dominated by the stiff
+  bond-stretch restoring forces a functional feels whenever its bond
+  lengths differ slightly from the reference ones (the same issue
+  nm_sampling addressed in 2026-10), and an optimization trajectory
+  starts from unrelaxed bonds by construction. New optional
+  `fragments` field (same per-structure atom-index partition as
+  nm_sampling, shared validator in `models/base.py`): when given, the
+  force error at every step is split per fragment into its net force
+  and torque (purely intermolecular by Newton's third law) and the
+  remainder after projecting out the fragment's rigid translation and
+  rotation (intramolecular). New metrics `rmsd_force_intermolecular`,
+  `rmsd_torque`, `rmsd_force_intramolecular`, a `TRAJECTORY
+  FORCE-ERROR DECOMPOSITION` per-group table, and the arrays in
+  `raw_deltas_trajectory.npz`. New `ranking_metric`
+  (`"intermolecular"`, default, or `"total"`) selects which force RMSD
+  enters the combined z-score ranking as `rmsd_force`; it falls back
+  to `total` with a warning when `fragments` is absent, so existing
+  configs behave as before. `examples/geom_benchmark.json` carries a
+  `fragments` block. Tests cover the decomposition (stretch → zero net
+  force and torque; rigid translation → net force only; couple →
+  torque only), config validation, ranking-key selection and the
+  metrics integration.
+
 ### Fixed
+
+- **`sampling`: resume submits missing refinement calculations.** Every
+  nonempty refinement dataset is now submitted at the requested refinement
+  level before checking the binding-site target, even when harvesting adds
+  no new geometries. This recovers interrupted submissions and supports a
+  changed refinement level. Existing calculation records are reused, and
+  empty datasets are skipped.
 
 - **`mbe_extract`: higher-order decomposition and convergence.** Extraction
   now retains every reported n-body energy contribution for CP, NOCP and VMFC,
@@ -1173,7 +1207,7 @@ configs and the legacy `launch_*.py` scripts no longer work.
    the four-stoich layout (one dataset per stoichiometry type) if the
    migration script was used.
 
-[0.12.0]: https://github.com/QCMM/beep/releases/tag/v0.12.0
+[0.12.0]: https://github.com/astrochem-data/beep/releases/tag/v0.12.0
 
 ## Periodic workflow migration
 

@@ -20,6 +20,13 @@
 
     "use_initial_reference_geometry": false,
     "trajectory_analysis": true,
+    "fragments": {
+        "h2s_3":       [[0,1,2], [3,4,5], [6,7,8]],
+        "h2s_2_h2o_1": [[0,1,2], [3,4,5], [6,7,8]],
+        "h2s_1_h2o_2": [[0,1,2], [3,4,5], [6,7,8]],
+        "h2o_3":       [[0,1,2], [3,4,5], [6,7,8]]
+    },
+    "ranking_metric": "intermolecular",
     "score_weights": {"rmsd_eq": 1.0, "rmsd_force": 1.0},
     "generate_plots": false
 }

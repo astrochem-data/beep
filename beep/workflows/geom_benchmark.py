@@ -259,6 +259,18 @@ def run(config: GeomBenchmarkConfig, client: FractalClient) -> None:
     padded_log(logger, "Starting BEEP geometry benchmark procedure", padding_char=gear)
     logger.info(f"Optimization dataset: {opt_dset_name}")
     logger.info(f"Benchmark Structures: {bchmk_structs}")
+    fragments_per_struct = None
+    if config.fragments is not None:
+        fragments_per_struct = {
+            name: [list(f) for f in partition]
+            for name, partition in config.fragments.items()
+        }
+        logger.info("Fragments for the trajectory force decomposition (per structure):")
+        for name in bchmk_structs:
+            p = fragments_per_struct[name]
+            n_atoms = sum(len(f) for f in p)
+            logger.info(f"  {name}: {len(p)} fragments ({n_atoms} atoms) → {p}")
+        logger.info(f"Trajectory ranking metric: {config.ranking_metric}")
 
     qcf.check_collection_existence(client, opt_dset_name)
     opt_dset = qcf.get_collection(client, "OptimizationDataset", opt_dset_name)
@@ -387,6 +399,7 @@ def run(config: GeomBenchmarkConfig, client: FractalClient) -> None:
             dft_program=dft_program, dft_keyword=dft_keyword,
             dft_tag=dft_tag, rmsd_df=rmsd_df,
             res_folder=data_folder, logger=logger,
+            fragments_per_struct=fragments_per_struct,
         )
 
     padded_log(

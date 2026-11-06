@@ -30,13 +30,31 @@ from .logging_utils import (
     padded_log,
     log_trajectory_metrics_per_group,
     log_trajectory_ranking_table,
+    log_nm_force_decomposition,
 )
 from .plotting_utils import trajectory_error_histograms
 from .trajectory_metrics import (
     per_step_deltas, summarize_method_metrics, combined_zscore_ranking,
+    decompose_force_errors_rigid, summarize_force_decomposition,
+    FORCE_PART_KEYS,
 )
 
+BOHR_TO_ANGSTROM = 0.529177210903
+
+# Config ranking_metric -> metrics key that enters the ranking as rmsd_force.
+RANKING_FORCE_KEYS = {
+    "total": "rmsd_force",
+    "intermolecular": "rmsd_force_intermolecular",
+}
+
 bcheck = "✔"
+
+TRAJECTORY_DECOMPOSITION_COLS = [
+    ("rmsd_force_intermolecular", "Net force", "{:>10.2f}"),
+    ("rmsd_torque", "Torque", "{:>10.2f}"),
+    ("rmsd_force_intramolecular", "Intramol.", "{:>10.2f}"),
+    ("rmsd_force", "Total", "{:>10.2f}"),
+]
 
 
 def collect_reference_trajectories(
@@ -189,7 +207,7 @@ def wait_for_trajectory_completion(
 
 def compute_per_method_trajectory_metrics(
     traj_data: dict, traj_dsets: dict, all_dft_functionals: List[str],
-    logger: logging.Logger,
+    logger: logging.Logger, fragments_per_struct: dict = None,
 ):
     """For each functional, aggregate per-step deltas across systems and
     return ``(metrics, raw_deltas)``.
@@ -198,12 +216,23 @@ def compute_per_method_trajectory_metrics(
     ``raw_deltas`` is a dict ``{functional → {delta_e arrays, delta_force
     arrays}}`` for downstream plotting. Skips functionals with no
     complete records.
+
+    With ``fragments_per_struct`` (``{structure → [[atom idx, ...], ...]}``)
+    the force error of every step is also split per fragment by
+    :func:`decompose_force_errors_rigid`, adding
+    ``rmsd_force_intermolecular`` (net force), ``rmsd_torque`` and
+    ``rmsd_force_intramolecular`` to the metrics and the matching flat
+    arrays to ``raw_deltas``. A structure whose partition does not match
+    its atom count is reported once and left out of the decomposition.
     """
     metrics: Dict[str, dict] = {}
     raw_deltas: Dict[str, dict] = {}
+    fragments_per_struct = fragments_per_struct or {}
+    bad_partition = set()
 
     for functional in all_dft_functionals:
         per_system = []
+        per_system_parts = []
         skipped_systems = 0
 
         for struct_name, steps in traj_data.items():
@@ -211,7 +240,7 @@ def compute_per_method_trajectory_metrics(
             if ds_sp is None:
                 continue
 
-            ref_e, ref_g, dft_e, dft_g = [], [], [], []
+            ref_e, ref_g, dft_e, dft_g, pos, masses = [], [], [], [], [], None
             n_atoms = None
             for i, step in enumerate(steps):
                 entry_name = f"step_{i:03d}"
@@ -225,20 +254,40 @@ def compute_per_method_trajectory_metrics(
                     continue
                 if n_atoms is None:
                     n_atoms = len(step["molecule"].symbols)
+                    masses = np.asarray(step["molecule"].masses, dtype=float)
                 ref_e.append(step["energy_hartree"])
                 ref_g.append(step["gradient_hartree_per_bohr"])
                 dft_e.append(de)
                 dft_g.append(dg)
+                pos.append(
+                    np.asarray(step["molecule"].geometry, dtype=float).reshape(-1, 3)
+                    * BOHR_TO_ANGSTROM
+                )
 
             if not ref_e:
                 skipped_systems += 1
                 continue
 
-            per_system.append(per_step_deltas(
+            deltas = per_step_deltas(
                 np.asarray(ref_e), np.asarray(ref_g),
                 np.asarray(dft_e), np.asarray(dft_g),
                 n_atoms=n_atoms,
-            ))
+            )
+            per_system.append(deltas)
+
+            partition = fragments_per_struct.get(struct_name)
+            if partition is not None and struct_name not in bad_partition:
+                try:
+                    per_system_parts.append(decompose_force_errors_rigid(
+                        deltas["delta_force_meV_per_A"], np.asarray(pos),
+                        masses, partition,
+                    ))
+                except ValueError as exc:
+                    bad_partition.add(struct_name)
+                    logger.warning(
+                        f"  {struct_name}: fragment partition unusable "
+                        f"({exc}) — excluded from the force decomposition."
+                    )
 
         if not per_system:
             logger.warning(
@@ -255,6 +304,12 @@ def compute_per_method_trajectory_metrics(
                 [d["delta_force_meV_per_A"].ravel() for d in per_system]
             ),
         }
+        if per_system_parts:
+            metrics[functional].update(summarize_force_decomposition(per_system_parts))
+            for part in FORCE_PART_KEYS:
+                raw_deltas[functional][f"delta_{part}"] = np.concatenate(
+                    [p[part] for p in per_system_parts]
+                )
         if skipped_systems:
             logger.info(
                 f"  {functional}: {skipped_systems} systems had no complete "
@@ -266,6 +321,7 @@ def compute_per_method_trajectory_metrics(
 def build_ranking_df(
     rmsd_df: pd.DataFrame, traj_metrics: dict,
     dft_geom_functionals: dict, score_weights: dict,
+    force_key: str = "rmsd_force",
 ):
     """Merge eq-RMSD and trajectory force-RMSD keyed by functional and
     compute the z-score combined ranking.
@@ -274,6 +330,12 @@ def build_ranking_df(
     ``traj_metrics`` keys are lowercase (the workflow convention). We
     look up in mixed case but emit lowercase keys so the intersection
     with ``traj_metrics`` is well-defined.
+
+    ``force_key`` names the entry of ``traj_metrics`` that stands in for
+    ``score_weights['rmsd_force']`` (``rmsd_force`` or
+    ``rmsd_force_intermolecular``); the ranking column carries that
+    name so the methodology block labels it correctly. Functionals
+    lacking it are left out.
 
     Energy is not part of the geom_benchmark ranking — absolute energies
     aren't meaningful for geometry quality. ``rmsd_energy`` stays
@@ -288,7 +350,11 @@ def build_ranking_df(
                 if not np.isnan(mean_val):
                     rmsd_eq[f.lower()] = mean_val
 
-    common = sorted(set(rmsd_eq.keys()) & set(traj_metrics.keys()))
+    common = sorted(
+        m for m in set(rmsd_eq.keys()) & set(traj_metrics.keys())
+        if force_key in traj_metrics[m]
+        and not np.isnan(traj_metrics[m][force_key])
+    )
     if not common:
         return None
 
@@ -296,13 +362,17 @@ def build_ranking_df(
         [
             {
                 "rmsd_eq": rmsd_eq[m],
-                "rmsd_force": traj_metrics[m]["rmsd_force"],
+                force_key: traj_metrics[m][force_key],
             }
             for m in common
         ],
         index=common,
     )
-    ranking_df = combined_zscore_ranking(metrics_df, score_weights)
+    weights = {
+        (force_key if k == "rmsd_force" else k): v
+        for k, v in score_weights.items()
+    }
+    ranking_df = combined_zscore_ranking(metrics_df, weights)
     return ranking_df.join(metrics_df, how="left")
 
 
@@ -311,6 +381,7 @@ def run_trajectory_analysis(
     all_dft_functionals: List[str], dft_geom_functionals: dict,
     dft_program: str, dft_keyword, dft_tag: str,
     rmsd_df: pd.DataFrame, res_folder: Path, logger: logging.Logger,
+    fragments_per_struct: dict = None,
 ):
     """Top-level driver for the trajectory benchmark.
 
@@ -366,10 +437,27 @@ def run_trajectory_analysis(
     logger.info("\nComputing per-method trajectory metrics…")
     traj_metrics, raw_deltas = compute_per_method_trajectory_metrics(
         traj_data, traj_dsets, all_dft_functionals, logger,
+        fragments_per_struct=fragments_per_struct,
     )
+
+    ranking_metric = getattr(config, "ranking_metric", "total")
+    decomposed = any("rmsd_force_intermolecular" in m for m in traj_metrics.values())
+    if ranking_metric == "intermolecular" and not decomposed:
+        logger.warning(
+            "\n  ranking_metric = 'intermolecular' needs 'fragments' in the "
+            "config; no fragment decomposition available — ranking by the "
+            "total force RMSD instead.\n"
+        )
+        ranking_metric = "total"
+    force_key = RANKING_FORCE_KEYS[ranking_metric]
+    score_weights = {
+        (force_key if k == "rmsd_force" else k): v
+        for k, v in config.score_weights.items()
+    }
 
     ranking_df = build_ranking_df(
         rmsd_df, traj_metrics, dft_geom_functionals, config.score_weights,
+        force_key=force_key,
     )
 
     padded_log(logger, "TRAJECTORY BENCHMARK RESULTS")
@@ -377,9 +465,29 @@ def run_trajectory_analysis(
         logger, traj_metrics, dft_geom_functionals, ranking_df,
     )
 
+    if decomposed:
+        padded_log(logger, "TRAJECTORY FORCE-ERROR DECOMPOSITION (meV/Å; torque meV)")
+        log_nm_force_decomposition(
+            logger, traj_metrics, dft_geom_functionals,
+            sort_key=force_key,
+            sort_label={"total": "Total", "intermolecular": "Net force"}[ranking_metric],
+            cols=TRAJECTORY_DECOMPOSITION_COLS,
+            present_key="rmsd_force_intermolecular",
+        )
+        logger.info("")
+        logger.info("  Net force / Torque = error of the force / torque on each fragment")
+        logger.info("              as a whole; forces between atoms of the same fragment")
+        logger.info("              cancel, so both are purely intermolecular.")
+        logger.info("  Intramol. = remainder after projecting out each fragment's rigid")
+        logger.info("              translation and rotation: zero net force and torque,")
+        logger.info("              i.e. bond-length and angle errors (stiff stretches")
+        logger.info("              dominate the Total).")
+        logger.info(f"  Rows sorted by the ranking metric (ranking_metric = '{ranking_metric}');")
+        logger.info("  the same metric enters the combined ranking below as RMSD_F.")
+
     padded_log(logger, "Combined ranking (z-score weighted)")
     log_trajectory_ranking_table(
-        logger, ranking_df, score_weights=config.score_weights,
+        logger, ranking_df, score_weights=score_weights,
     )
 
     folder_path_json = res_folder / "json"
@@ -410,6 +518,11 @@ def run_trajectory_analysis(
             npz_payload[f"{functional}__energy"] = np.asarray(
                 d["delta_e_per_atom_meV"]
             )
+            for part in FORCE_PART_KEYS:
+                if f"delta_{part}" in d:
+                    npz_payload[f"{functional}__force_{part}"] = np.asarray(
+                        d[f"delta_{part}"]
+                    )
         np.savez_compressed(
             res_folder / "raw_deltas_trajectory.npz", **npz_payload,
         )

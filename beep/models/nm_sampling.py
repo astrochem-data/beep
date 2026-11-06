@@ -2,7 +2,10 @@
 from typing import Optional, Literal, List, Dict, Any
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
-from .base import ServerConfig, lowercase_str, QC_KEYWORDS_DESCRIPTION, deprecated_null_only
+from .base import (
+    ServerConfig, lowercase_str, QC_KEYWORDS_DESCRIPTION, deprecated_null_only,
+    validate_fragment_partition,
+)
 
 
 class BandSpec(BaseModel):
@@ -267,40 +270,5 @@ class NmSamplingConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_fragments(self):
-        if not self.fragments:
-            raise ValueError("fragments must be non-empty.")
-        expected = set(self.benchmark_structures)
-        missing = expected - set(self.fragments.keys())
-        extra = set(self.fragments.keys()) - expected
-        if missing:
-            raise ValueError(
-                f"fragments is missing entries for benchmark structure(s): "
-                f"{sorted(missing)}."
-            )
-        if extra:
-            raise ValueError(
-                f"fragments has entries for structure(s) not in "
-                f"benchmark_structures: {sorted(extra)}."
-            )
-        for struct_name, partition in self.fragments.items():
-            if not partition:
-                raise ValueError(f"fragments[{struct_name!r}] is empty.")
-            seen: set = set()
-            for i, frag in enumerate(partition):
-                if not frag:
-                    raise ValueError(
-                        f"fragments[{struct_name!r}][{i}] is empty."
-                    )
-                for a in frag:
-                    if a < 0:
-                        raise ValueError(
-                            f"fragments[{struct_name!r}][{i}] contains negative "
-                            f"atom index {a}."
-                        )
-                    if a in seen:
-                        raise ValueError(
-                            f"atom index {a} appears in more than one fragment "
-                            f"for {struct_name!r} — fragments must be disjoint."
-                        )
-                    seen.add(a)
+        validate_fragment_partition(self.fragments, self.benchmark_structures)
         return self

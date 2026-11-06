@@ -635,8 +635,14 @@ def log_nm_force_decomposition(
     dft_geom_functionals: dict,
     sort_key: str = "rmsd_force_intermolecular",
     sort_label: str = "Net force",
+    cols: list = None,
+    present_key: str = "rmsd_force_response",
 ) -> None:
     """Per-group table of the nm_sampling force-error decomposition.
+
+    ``cols`` (``[(metric key, header, format), ...]``) overrides the
+    nm_sampling columns, e.g. for the trajectory benchmark, and
+    ``present_key`` is the metric a functional must carry to be listed.
 
     Columns: total force RMSD, its split over ± pairs into offset (force
     error at the displacement centre) and response (force error that grows
@@ -646,7 +652,7 @@ def log_nm_force_decomposition(
     is marked ``*`` and listed in a per-group summary. Functionals without
     decomposition data are skipped.
     """
-    cols = [
+    cols = cols or [
         ("rmsd_force_intermolecular", "Net force", "{:>10.2f}"),
         ("rmsd_torque", "Torque", "{:>10.2f}"),
         ("geometry_shift_intermolecular", "Shift (Å)", "{:>10.3f}"),
@@ -665,7 +671,7 @@ def log_nm_force_decomposition(
     for group, funcs in dft_geom_functionals.items():
         in_group = [
             f for f in funcs
-            if "rmsd_force_response" in nm_metrics.get(f.lower(), {})
+            if present_key in nm_metrics.get(f.lower(), {})
         ]
         if not in_group:
             continue
@@ -706,6 +712,9 @@ def log_nm_force_decomposition(
 _RANKING_METRIC_META = {
     "rmsd_eq":    ("RMSD_eq", "equilibrium-geometry deviation, Å"),
     "rmsd_force": ("RMSD_F",  "per-Cartesian-component force RMSE, meV/Å"),
+    "rmsd_force_intermolecular": (
+        "RMSD_F", "net intermolecular force RMSE per fragment, meV/Å",
+    ),
 }
 
 
