@@ -58,8 +58,65 @@ TRAJECTORY_DECOMPOSITION_COLS = [
 ]
 
 
+def _kabsch_rmsd(P, Q):
+    """Minimal RMSD between two (n,3) coordinate sets (same units) after
+    optimal rigid translation + rotation (Kabsch). Unweighted."""
+    Pc = P - P.mean(axis=0)
+    Qc = Q - Q.mean(axis=0)
+    C = Pc.T @ Qc
+    V, S, Wt = np.linalg.svd(C)
+    d = np.sign(np.linalg.det(V @ Wt))
+    U = V @ np.diag([1.0, 1.0, d]) @ Wt
+    Pc_aligned = Pc @ U
+    return float(np.sqrt(np.mean(np.sum((Pc_aligned - Qc) ** 2, axis=1))))
+
+
+def _dedup_trajectory_steps(steps, rmsd_thr, min_frames, logger, struct_name):
+    """Group reference-trajectory frames by Kabsch-aligned RMSD and keep only
+    the geometrically distinct ones (compute-saving pre-filter).
+
+    Keeps the first frame, then each later frame whose RMSD to the last kept
+    frame exceeds ``rmsd_thr`` (Angstrom). If fewer than ``min_frames`` survive
+    (a near-stationary system), the most-displaced dropped frames are added
+    back up to the floor. Returns the kept steps in trajectory order.
+    """
+    if not rmsd_thr or rmsd_thr <= 0 or len(steps) <= 1:
+        return steps
+
+    def coords_ang(st):
+        g = np.asarray(st["molecule"].geometry, dtype=float).reshape(-1, 3)
+        return g * BOHR_TO_ANGSTROM
+
+    kept_idx = [0]
+    last = coords_ang(steps[0])
+    for i in range(1, len(steps)):
+        c = coords_ang(steps[i])
+        if _kabsch_rmsd(c, last) > rmsd_thr:
+            kept_idx.append(i)
+            last = c
+
+    if len(kept_idx) < min_frames:
+        ref = coords_ang(steps[0])
+        dropped = [i for i in range(len(steps)) if i not in set(kept_idx)]
+        dropped.sort(key=lambda i: _kabsch_rmsd(coords_ang(steps[i]), ref),
+                     reverse=True)
+        for i in dropped:
+            if len(kept_idx) >= min_frames:
+                break
+            kept_idx.append(i)
+        kept_idx.sort()
+
+    if len(kept_idx) < len(steps):
+        logger.info(
+            f"  {struct_name}: dedup {len(steps)} -> {len(kept_idx)} frames "
+            f"(RMSD threshold {rmsd_thr} Angstrom)"
+        )
+    return [steps[i] for i in kept_idx]
+
+
 def collect_reference_trajectories(
     odset_dict: dict, geom_ref_opt_lot: str, logger: logging.Logger,
+    dedup_rmsd: float = None, dedup_min_frames: int = 1,
 ) -> dict:
     """Pull each system's reference optimization trajectory.
 
@@ -93,6 +150,12 @@ def collect_reference_trajectories(
                 f"{geom_ref_opt_lot} — skipping system."
             )
             continue
+        # Compute-saving dedup, before the gradient-coverage check so a
+        # stationary gradient-less tail frame is collapsed away rather than
+        # excluding the whole system.
+        steps = _dedup_trajectory_steps(
+            steps, dedup_rmsd, dedup_min_frames, logger, struct_name,
+        )
         if any(s["gradient_hartree_per_bohr"] is None for s in steps):
             logger.warning(
                 f"  Reference trajectory for {struct_name} missing gradient "
@@ -429,6 +492,8 @@ def run_trajectory_analysis(
     logger.info("\nCollecting reference trajectories…")
     traj_data = collect_reference_trajectories(
         odset_dict, geom_ref_opt_lot, logger,
+        dedup_rmsd=getattr(config, "trajectory_dedup_rmsd", None),
+        dedup_min_frames=getattr(config, "trajectory_dedup_min_frames", 1),
     )
     if not traj_data:
         logger.warning(

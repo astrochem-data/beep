@@ -78,6 +78,29 @@ class GeomBenchmarkConfig(BaseModel):
             "legacy eq-geometry-only behaviour."
         ),
     )
+    trajectory_dedup_rmsd: Optional[float] = Field(
+        None,
+        description=(
+            "Compute-saving pre-filter for the trajectory force benchmark. "
+            "If set (Angstrom, e.g. 0.02), reference-trajectory frames are "
+            "grouped by Kabsch-aligned RMSD and only geometrically distinct "
+            "frames (RMSD > this value from the last kept frame) are kept, so "
+            "SP+gradients are not computed at near-identical copies (the "
+            "optimizer's stationary tail). Applied to the shared reference "
+            "frame set, so reference and every functional stay aligned. The "
+            "ranking is essentially unchanged; it only reduces cost. None or "
+            "0 (default) disables dedup."
+        ),
+    )
+    trajectory_dedup_min_frames: int = Field(
+        1,
+        description=(
+            "Per-structure floor on frames kept by trajectory_dedup_rmsd, so "
+            "a near-stationary system still contributes at least this many "
+            "points (the first frame plus the most-displaced ones). Ignored "
+            "when trajectory_dedup_rmsd is unset."
+        ),
+    )
     fragments: Optional[Dict[str, List[List[int]]]] = Field(
         None,
         description=(
