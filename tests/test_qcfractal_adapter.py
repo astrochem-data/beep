@@ -718,9 +718,71 @@ def test_compute_be_dft_energies_d4_uses_dftd4_program(mock_submit):
     assert disp_calls[0].kwargs["basis"] is None
 
 
+@pytest.mark.parametrize("lot", ["wb97m-d3bj_def2-tzvppd", "B97M-D3BJ_def2-tzvp",
+                                 "b97-d3bj_def2-tzvp", "b97-d3mbj_def2-tzvp"])
+@patch("beep.adapters.qcfractal_adapter.submit_energies")
+def test_compute_be_dft_energies_integrated_dispersion_methods(mock_submit, lot):
+    """Functionals without a bare psi4 form → one integrated psi4 spec per stoich,
+    no dispersion-only spec."""
+    from beep.adapters.qcfractal_adapter import compute_be_dft_energies, STOICH_TYPES
+
+    mock_submit.return_value = _fake_submit_result()
+    compute_be_dft_energies(
+        client=MagicMock(), rdset_base_name="be_CH4_W12_10",
+        all_dft=[lot], tag="test", program="psi4", logger=MagicMock(),
+    )
+    method, basis = lot.split("_", 1)
+    assert mock_submit.call_count == len(STOICH_TYPES)
+    for call in mock_submit.call_args_list:
+        assert call.kwargs["program"] == "psi4"
+        assert call.kwargs["method"] == method
+        assert call.kwargs["basis"] == basis
+
+
+def test_integrated_dispersion_methods_match_psi4():
+    """The list equals psi4's suffixed functionals whose bare name psi4 lacks."""
+    functionals = pytest.importorskip(
+        "psi4.driver.procrouting.dft").functionals
+    from beep.adapters.qcfractal_adapter import (
+        DISPERSION_SUFFIXES, INTEGRATED_DISPERSION_METHODS)
+
+    expected = set()
+    for name in functionals:
+        for suffix in DISPERSION_SUFFIXES:
+            if name.endswith(suffix):
+                if name[: -len(suffix)] not in functionals:
+                    expected.add(name)
+                break
+    assert expected == set(INTEGRATED_DISPERSION_METHODS)
+
+
 # ---------------------------------------------------------------------------
 # fetch_reaction_values — separated-pair recombination, integrated-spec skip
 # ---------------------------------------------------------------------------
+
+
+@patch("beep.adapters.qcfractal_adapter._stoich_dataset_name",
+       return_value="be_CH4_W12_10_bsse")
+def test_fetch_reaction_values_reads_integrated_dispersion_method(mock_ds_name):
+    """wb97m-d3bj is stored integrated and comes back as its own column, next
+    to a separated pair that is still summed as before."""
+    from beep.adapters.qcfractal_adapter import fetch_reaction_values
+    import qcelemental as qcel
+
+    records = {
+        "wb97m-d3bj_def2-tzvppd": {"entry1": -2.0},
+        "b3lyp_def2-tzvpd":       {"entry1": -1.0},
+        "b3lyp-d4":               {"entry1": -0.01},
+    }
+    mock_client = MagicMock()
+    mock_client.get_dataset.return_value = _fake_reaction_dataset(records)
+    df = fetch_reaction_values(mock_client, "be_CH4_W12_10", stoich="bsse")
+
+    conv = qcel.constants.hartree2kcalmol
+    assert sorted(df.columns) == ["b3lyp-d4/def2-tzvpd", "wb97m-d3bj/def2-tzvppd"]
+    assert df.loc["entry1", "wb97m-d3bj/def2-tzvppd"] == pytest.approx(-2.0 * conv)
+    assert df.loc["entry1", "b3lyp-d4/def2-tzvpd"] == pytest.approx(-1.01 * conv)
+
 
 def _fake_reaction_dataset(records_by_spec):
     """Build a mock ReactionDataset for fetch_reaction_values tests.

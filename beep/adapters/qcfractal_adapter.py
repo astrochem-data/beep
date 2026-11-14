@@ -1031,7 +1031,10 @@ def fetch_reaction_values(client: PortalClient, rdset_base_name: str,
     → ``mpwb1k-d3bj/def2-tzvpd``) for every suffix in
     ``DISPERSION_SUFFIXES``. Integrated specs (method carrying a
     dispersion suffix together with a basis, e.g. ``mpwb1k-d3bj_def2-tzvpd``)
-    are skipped with a warning — BEEP no longer supports that layout.
+    are skipped with a warning — BEEP no longer supports that layout. The
+    exception are the methods in :data:`INTEGRATED_DISPERSION_METHODS`
+    (e.g. ``wb97m-d3bj_def2-tzvppd``), which are only ever stored integrated
+    and are read as their own column.
 
     Column labels are lowercase, matching the lowercase QCSpec convention
     used by every workflow (see ``models/base.py::lowercase_str``).
@@ -1047,7 +1050,9 @@ def fetch_reaction_values(client: PortalClient, rdset_base_name: str,
     data = {}
     skipped_integrated: List[str] = []
     for sname in spec_names:
-        if "_" in sname and _has_dispersion_suffix(sname.split("_", 1)[0]):
+        sm = sname.split("_", 1)[0]
+        if ("_" in sname and _has_dispersion_suffix(sm)
+                and not _is_integrated_dispersion(sm)):
             skipped_integrated.append(sname)
             continue
 
@@ -1315,6 +1320,25 @@ def _has_dispersion_suffix(name: str) -> bool:
     return any(m.endswith(s) for s in DISPERSION_SUFFIXES)
 
 
+# Dispersion-corrected functionals that BE energies submit as ONE integrated
+# psi4 spec instead of the separated bare-DFT + bare-dispersion pair: psi4
+# (1.10) defines no bare functional for them (no "wb97m", "b97m", "b97"; only
+# the -V / -D forms), so the bare half of the split cannot run. Generated from
+# psi4's functional list: every suffixed name whose bare name psi4 lacks
+# (tests/test_qcfractal_adapter.py checks this against psi4 when installed).
+INTEGRATED_DISPERSION_METHODS: frozenset = frozenset({
+    "wb97m-d3bj",
+    "b97m-d3bj",
+    "b97-d3bj",
+    "b97-d3mbj",
+})
+
+
+def _is_integrated_dispersion(method: str) -> bool:
+    """True if ``method`` is in :data:`INTEGRATED_DISPERSION_METHODS`."""
+    return method.lower() in INTEGRATED_DISPERSION_METHODS
+
+
 # psi4/dftd3-style dispersion suffix -> (harness keyword field, native keyword
 # token) per program. Programs listed here store dispersion-corrected Hessians
 # as bare functional + native dispersion keyword; the dict's insertion order is
@@ -1421,7 +1445,11 @@ def compute_be_dft_energies(
     spec_names: List[str] = []
     for i, lot in enumerate(all_dft):
         method, basis = split_lot_string(lot)
-        bare, disp_method, disp_program = _split_dispersion(method)
+        if _is_integrated_dispersion(method):
+            # psi4 has no bare form of this functional: keep it integrated
+            bare, disp_method, disp_program = method, None, None
+        else:
+            bare, disp_method, disp_program = _split_dispersion(method)
         logger.info(f"Processing method: {method}, basis: {basis}")
 
         lot_submitted = 0
