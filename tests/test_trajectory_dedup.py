@@ -76,6 +76,55 @@ def test_dedup_min_frames_floor():
     assert kept3[0] is steps[0]      # first frame always kept
 
 
+class _Mol:
+    """Molecule stand-in with a server id and a geometry hash."""
+    def __init__(self, mid, h):
+        self.id, self._h = mid, h
+
+    def get_hash(self):
+        return self._h
+
+
+def test_entry_names_follow_frame_index_through_dedup():
+    """Kept frames are named by their index in the full trajectory, so the
+    same geometry gets the same entry name for any dedup threshold."""
+    from beep.core.trajectory_workflow import trajectory_entry_name
+    # three plateaus: frames 0-2, 3-7 and 8-9 are geometrically identical within each
+    bond = [1.13] * 3 + [1.43] * 5 + [1.73] * 2
+    steps = [_step([[0, 0, 0], [b, 0, 0]]) for b in bond]
+    for i, s in enumerate(steps):
+        s["frame"] = i                       # as set by collect_reference_trajectories
+    kept = _dedup_trajectory_steps(steps, 0.02, 1, log, "x")
+    names = [trajectory_entry_name(s, j) for j, s in enumerate(kept)]
+    assert names == ["step_000", "step_003", "step_008"]
+    # without a recorded frame index the position is used (old behaviour)
+    assert trajectory_entry_name({}, 4) == "step_004"
+
+
+def test_check_trajectory_entries_accepts_same_and_new():
+    from beep.core.trajectory_workflow import check_trajectory_entries
+    stored = [SimpleNamespace(name="step_000", molecule=_Mol(11, "a"))]
+    ds = SimpleNamespace(name="x_trajref", entry_names=["step_000"],
+                         iterate_entries=lambda entry_names: [e for e in stored if e.name in entry_names])
+    # same molecule under the same name, plus a new name: fine
+    check_trajectory_entries(ds, [("step_000", _Mol(11, "a")), ("step_005", _Mol(15, "e"))])
+    # same geometry, molecule not yet on the server (no id): hashes agree
+    check_trajectory_entries(ds, [("step_000", _Mol(None, "a"))])
+
+
+def test_check_trajectory_entries_rejects_other_geometry():
+    """An entry written by an earlier run under another numbering must stop
+    the workflow instead of silently pairing mismatched frames."""
+    from beep.core.trajectory_workflow import check_trajectory_entries
+    stored = [SimpleNamespace(name="step_001", molecule=_Mol(11, "frame1"))]
+    ds = SimpleNamespace(name="x_trajref", entry_names=["step_001"],
+                         iterate_entries=lambda entry_names: [e for e in stored if e.name in entry_names])
+    with pytest.raises(ValueError, match="different geometry"):
+        check_trajectory_entries(ds, [("step_001", _Mol(13, "frame3"))])
+    with pytest.raises(ValueError, match="different geometry"):
+        check_trajectory_entries(ds, [("step_001", _Mol(None, "frame3"))])
+
+
 def test_config_accepts_dedup_fields():
     from beep.models.geom_benchmark import GeomBenchmarkConfig
     c = GeomBenchmarkConfig(

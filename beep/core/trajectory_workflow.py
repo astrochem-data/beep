@@ -150,6 +150,12 @@ def collect_reference_trajectories(
                 f"{geom_ref_opt_lot} — skipping system."
             )
             continue
+        # Remember each frame's position in the reference trajectory before
+        # dedup drops frames: the _trajref entry of a frame is named by this
+        # index (trajectory_entry_name), so a frame keeps its entry name
+        # whatever dedup threshold a run uses.
+        for i, step in enumerate(steps):
+            step["frame"] = i
         # Compute-saving dedup, before the gradient-coverage check so a
         # stationary gradient-less tail frame is collapsed away rather than
         # excluding the whole system.
@@ -169,13 +175,68 @@ def collect_reference_trajectories(
     return out
 
 
+def trajectory_entry_name(step: dict, position: int) -> str:
+    """``_trajref`` entry name of a reference-trajectory frame.
+
+    Named by the frame's index in the full reference trajectory
+    (``step["frame"]``, set before dedup), not by its position in the
+    possibly deduplicated list, so reruns with another dedup threshold
+    address the same geometry under the same name. ``position`` is the
+    fallback for steps without a recorded frame index.
+    """
+    return f"step_{step.get('frame', position):03d}"
+
+
+def _molecule_key(mol):
+    """Identity of a molecule for the entry check: server id when both sides
+    have one, else the geometry hash."""
+    mid = getattr(mol, "id", None)
+    return ("id", mid) if mid is not None else ("hash", mol.get_hash())
+
+
+def check_trajectory_entries(ds_sp, entries) -> None:
+    """Stop if an existing ``_trajref`` entry holds a different geometry.
+
+    ``add_entries`` leaves existing names untouched, so a dataset written by
+    an earlier run (e.g. before entries were named by frame index, when
+    dedup renumbered the kept frames) can hold another frame under the same
+    name. Gradients read back by name would then be compared with the
+    reference gradient of a different geometry, without any error.
+    """
+    present = set(ds_sp.entry_names)
+    names = [n for n, _ in entries if n in present]
+    if not names:
+        return
+    stored = {e.name: e.molecule for e in ds_sp.iterate_entries(entry_names=names)}
+    bad = []
+    for name, mol in entries:
+        old = stored.get(name)
+        if old is None:
+            continue
+        a, b = _molecule_key(old), _molecule_key(mol)
+        if a[0] != b[0]:            # one side without server id: compare hashes
+            a, b = ("hash", old.get_hash()), ("hash", mol.get_hash())
+        if a != b:
+            bad.append(name)
+    if bad:
+        raise ValueError(
+            f"{ds_sp.name}: entries {bad} already hold a different geometry "
+            "than the reference-trajectory frame of the same name (dataset "
+            "written by an earlier run with another frame numbering). Delete "
+            "this _trajref dataset (records are kept and relinked) or use new "
+            "benchmark entry names, then rerun."
+        )
+
+
 def build_trajectory_sp_datasets(
     client, traj_data: dict, all_dft_functionals: List[str],
     program: str, dft_keyword, logger: logging.Logger,
 ) -> dict:
     """Per system: create ``<system>_trajref`` SinglepointDataset, add one
-    entry per traj step (``step_NNN``), and register one SP+gradient spec
-    per DFT functional. Idempotent — safe to re-run."""
+    entry per traj step (``step_NNN``, NNN = frame index in the reference
+    trajectory), and register one SP+gradient spec per DFT functional.
+    Idempotent — safe to re-run; stops if an existing entry holds another
+    geometry (:func:`check_trajectory_entries`)."""
     traj_dsets = {}
     # Inline keyword dict validated by the config model; pass it through.
     kw = dict(dft_keyword or {})
@@ -184,9 +245,10 @@ def build_trajectory_sp_datasets(
         ds_sp = qcf.get_or_create_singlepoint_dataset(client, ds_name)
 
         entries = [
-            (f"step_{i:03d}", step["molecule"])
+            (trajectory_entry_name(step, i), step["molecule"])
             for i, step in enumerate(steps)
         ]
+        check_trajectory_entries(ds_sp, entries)
         qcf.add_singlepoint_entries(ds_sp, entries)
 
         for functional in all_dft_functionals:
@@ -328,7 +390,7 @@ def compute_per_method_trajectory_metrics(
             ref_e, ref_g, dft_e, dft_g, pos, masses = [], [], [], [], [], None
             n_atoms = None
             for i, step in enumerate(steps):
-                entry_name = f"step_{i:03d}"
+                entry_name = trajectory_entry_name(step, i)
                 de, dg = qcf.fetch_sp_energy_gradient(
                     ds_sp, entry_name, functional,
                 )

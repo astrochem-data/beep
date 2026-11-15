@@ -608,6 +608,9 @@ def test_periodic_dispersion_leaves_cluster_routing_untouched():
         ("pbe-d3", 2, "gaussian", ("pbe", {"route_input": "EmpiricalDispersion=GD3"})),
         ("pbe", 1, "gaussian", ("pbe", {})),
         ("b3lyp-d3bj", 1, "Gaussian", ("b3lyp", {"route_input": "EmpiricalDispersion=GD3BJ"})),
+        # mace: opt-LOT alias -> model file, no keywords (harness default: full fd Hessian)
+        ("lmft-ch4-b3lypd4-v4", 1, "mace", ("lmft-ch4-b3lypd4-v4.model", {})),
+        ("mace-off23-large.model", 2, "MACE", ("mace-off23-large.model", {})),
     ],
 )
 def test_hessian_method_and_keywords(method, mult, program, expected):

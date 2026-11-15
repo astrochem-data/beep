@@ -1376,7 +1376,15 @@ def hessian_method_and_keywords(method: str, mult: int, program: str) -> Tuple[s
     separate dftd3/dftd4 records. The psi4-style keywords are dropped: both
     programs' Hessians are analytic and UKS/UHF follows from the molecule
     multiplicity.
+
+    mace: the opt-LOT name of an MLP optimization is the model alias
+    (``lmft-ch4-b3lypd4-v4``); the MACE harness takes the model file, so
+    ``.model`` is appended. No keywords: the harness default is the full
+    Hessian by central differences of the forces (step 0.005 Angstrom), and
+    the psi4 keywords are meaningless to it.
     """
+    if program.lower() == "mace":
+        return (method if method.endswith(".model") else f"{method}.model"), {}
     spec = DISPERSION_KEYWORD_SPEC.get(program.lower())
     if spec is not None:
         field, table = spec
@@ -1533,8 +1541,17 @@ def _collect_reaction_record_ids(client: PortalClient,
     for stoich in stoich_types:
         ds_name = _stoich_dataset_name(rdset_base_name, stoich)
         ds = client.get_dataset("reaction", ds_name)
+        specs = spec_filter
+        if spec_filter is not None:
+            # A LOT can be skipped for one stoichiometry (compute_be_dft_energies
+            # submits no bsse for -3c methods), so its spec is absent from that
+            # dataset; asking qcportal for it raises "Missing specifications".
+            present = {s.lower() for s in ds.specification_names}
+            specs = [s for s in spec_filter if s in present]
+            if not specs:
+                continue
         for _, _, record in ds.iterate_records(
-            specification_names=spec_filter,
+            specification_names=specs,
             status=[RecordStatusEnum.complete, RecordStatusEnum.running,
                     RecordStatusEnum.waiting, RecordStatusEnum.error],
         ):
